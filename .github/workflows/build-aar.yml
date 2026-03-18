@@ -26,7 +26,14 @@ jobs:
           unzip -q ndk.zip -d $HOME
           echo "ANDROID_NDK_ROOT=$HOME/android-ndk-r22b" >> $GITHUB_ENV
 
-      - name: Install ALL required build dependencies
+      - name: Patch cpu-features CMakeLists.txt for CMake 3.5+
+        run: |
+          find $HOME/android-ndk-r22b -name "CMakeLists.txt" -path "*/cpu-features/*" \
+            -exec sed -i 's/cmake_minimum_required(VERSION 2\.[0-9]\+)/cmake_minimum_required(VERSION 3.5)/g' {} \;
+          echo "Patched files:"
+          grep -r "cmake_minimum_required" $HOME/android-ndk-r22b/sources/android/cpufeatures/
+
+      - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -48,7 +55,7 @@ jobs:
             --disable-x86 \
             --disable-x86-64
 
-      - name: Print build.log on failure   # ← THIS is what we need
+      - name: Print build.log on failure
         if: failure()
         run: |
           echo "========== BUILD LOG =========="
