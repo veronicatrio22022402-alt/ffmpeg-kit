@@ -25,7 +25,16 @@ jobs:
           wget -q https://dl.google.com/android/repository/android-ndk-r22b-linux-x86_64.zip -O ndk.zip
           unzip -q ndk.zip -d $HOME
           echo "ANDROID_NDK_ROOT=$HOME/android-ndk-r22b" >> $GITHUB_ENV
-
+          
+      - name: Find cpu-features CMakeLists.txt location
+        run: |
+          echo "=== Searching for CMakeLists.txt ==="
+          find $HOME/android-ndk-r22b -name "CMakeLists.txt" | head -20
+          echo "=== Searching for cpu-features folder ==="
+          find $HOME/android-ndk-r22b -type d -name "cpufeatures" -o -type d -name "cpu-features" | head -10
+          echo "=== NDK sources folder ==="
+          ls $HOME/android-ndk-r22b/sources/android/ 2>/dev/null || echo "sources/android not found"
+     
       - name: Patch cpu-features CMakeLists.txt for CMake 3.5+
         run: |
           find $HOME/android-ndk-r22b -name "CMakeLists.txt" -path "*/cpu-features/*" \
