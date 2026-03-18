@@ -26,13 +26,17 @@ jobs:
           unzip -q ndk.zip -d $HOME
           echo "ANDROID_NDK_ROOT=$HOME/android-ndk-r22b" >> $GITHUB_ENV
 
-      - name: Install build dependencies
+      - name: Install ALL required build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             autoconf automake libtool pkg-config \
-            curl git cmake nasm yasm \
-            build-essential gcc g++
+            curl git doxygen nasm cmake \
+            gcc g++ gperf texinfo yasm \
+            bison autogen wget autopoint \
+            meson ninja-build ragel groff \
+            gtk-doc-tools libtasn1-6-dev \
+            build-essential
 
       - name: Build AAR (arm64-v8a only)
         run: |
