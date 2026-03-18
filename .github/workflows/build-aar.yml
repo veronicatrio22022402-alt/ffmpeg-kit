@@ -1,0 +1,47 @@
+name: Build FFmpegKit AAR
+
+on:
+  workflow_dispatch:  # Manual trigger button in Actions tab
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout ffmpeg-kit
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Install NDK r25c
+        run: |
+          echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;25.2.9519653"
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/25.2.9519653" >> $GITHUB_ENV
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            autoconf automake libtool pkg-config \
+            curl git cmake nasm yasm
+
+      - name: Build 4KB AAR (Standard - works Android 5+)
+        run: |
+          ./android.sh \
+            --enable-gpl \
+            --enable-x264 \
+            --disable-x86 \
+            --disable-x86-64
+          cp prebuilt/android-aar/ffmpeg-kit.aar ffmpeg-kit-4kb.aar
+
+      - name: Upload 4KB AAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-kit-4kb
+          path: ffmpeg-kit-4kb.aar
+          retention-days: 30
