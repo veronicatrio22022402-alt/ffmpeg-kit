@@ -14,22 +14,17 @@ jobs:
       - name: Checkout ffmpeg-kit
         uses: actions/checkout@v4.2.2
 
-      - name: Setup Java 17
+      - name: Setup Java 11      # ffmpeg-kit 6.0 requires Java 11, not 17
         uses: actions/setup-java@v4.7.0
         with:
-          java-version: '17'
+          java-version: '11'
           distribution: 'temurin'
 
-      - name: Download & Extract NDK r25c directly
+      - name: Download NDK r22b (officially tested version for ffmpeg-kit 6.0)
         run: |
-          wget -q https://dl.google.com/android/repository/android-ndk-r25c-linux.zip -O ndk.zip
+          wget -q https://dl.google.com/android/repository/android-ndk-r22b-linux-x86_64.zip -O ndk.zip
           unzip -q ndk.zip -d $HOME
-          echo "ANDROID_NDK_ROOT=$HOME/android-ndk-r25c" >> $GITHUB_ENV
-
-      - name: Verify cpu-features source exists
-        run: |
-          ls $HOME/android-ndk-r25c/sources/android/cpufeatures/
-          echo "cpu-features source confirmed ✅"
+          echo "ANDROID_NDK_ROOT=$HOME/android-ndk-r22b" >> $GITHUB_ENV
 
       - name: Install build dependencies
         run: |
@@ -39,14 +34,14 @@ jobs:
             curl git cmake nasm yasm \
             build-essential gcc g++
 
-      - name: Build 4KB AAR (Standard - works Android 5+)
+      - name: Build 4KB AAR
         run: |
           ./android.sh \
             --enable-gpl \
             --enable-x264 \
             --disable-x86 \
             --disable-x86-64
-          cp prebuilt/android-aar/ffmpeg-kit.aar ffmpeg-kit-4kb.aar
+          cp prebuilt/bundle-android-aar/ffmpeg-kit/ffmpeg-kit.aar ffmpeg-kit-4kb.aar
 
       - name: Upload 4KB AAR
         uses: actions/upload-artifact@v4.6.2
