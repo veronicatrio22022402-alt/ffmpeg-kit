@@ -26,11 +26,14 @@ jobs:
           unzip -q ndk.zip -d $HOME
           echo "ANDROID_NDK_ROOT=$HOME/android-ndk-r22b" >> $GITHUB_ENV
 
-      - name: Install CMake 3.30 (last version supporting cmake_minimum_required < 3.5)
+      - name: Create cmake wrapper (injects CMAKE_POLICY_VERSION_MINIMUM=3.5)
         run: |
-          sudo apt-get remove -y cmake
-          wget -q https://github.com/Kitware/CMake/releases/download/v3.30.8/cmake-3.30.8-linux-x86_64.sh -O cmake.sh
-          sudo bash cmake.sh --skip-license --prefix=/usr/local
+          sudo tee /usr/local/bin/cmake > /dev/null << 'EOF'
+          #!/bin/bash
+          exec /usr/bin/cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5 "$@"
+          EOF
+          sudo chmod +x /usr/local/bin/cmake
+          which cmake
           cmake --version
 
       - name: Install build dependencies
