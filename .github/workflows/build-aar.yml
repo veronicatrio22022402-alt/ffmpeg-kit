@@ -47,7 +47,18 @@ jobs:
             --disable-arm-v7a-neon \
             --disable-x86 \
             --disable-x86-64
-          cp prebuilt/bundle-android-aar/ffmpeg-kit/ffmpeg-kit.aar ffmpeg-kit-4kb.aar
+
+      - name: Print build.log on failure   # ← THIS is what we need
+        if: failure()
+        run: |
+          echo "========== BUILD LOG =========="
+          find . -name "build.log" | while read f; do
+            echo "--- $f ---"
+            cat "$f"
+          done
+
+      - name: Copy AAR
+        run: cp prebuilt/bundle-android-aar/ffmpeg-kit/ffmpeg-kit.aar ffmpeg-kit-4kb.aar
 
       - name: Upload 4KB AAR
         uses: actions/upload-artifact@v4.6.2
