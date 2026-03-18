@@ -1,7 +1,10 @@
 name: Build FFmpegKit AAR
 
 on:
-  workflow_dispatch:  # Manual trigger button in Actions tab
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true   # Opt into Node.js 24 now
 
 jobs:
   build:
@@ -10,10 +13,10 @@ jobs:
 
     steps:
       - name: Checkout ffmpeg-kit
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2        # ← updated (Node 24 compatible)
 
       - name: Setup Java 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v4.7.0      # ← updated (Node 24 compatible)
         with:
           java-version: '17'
           distribution: 'temurin'
@@ -40,7 +43,7 @@ jobs:
           cp prebuilt/android-aar/ffmpeg-kit.aar ffmpeg-kit-4kb.aar
 
       - name: Upload 4KB AAR
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2  # ← updated (Node 24 compatible)
         with:
           name: ffmpeg-kit-4kb
           path: ffmpeg-kit-4kb.aar
