@@ -91,18 +91,3 @@ jobs:
           name: ffmpeg-kit-universal
           path: ffmpeg-kit-universal.aar
           retention-days: 30
-```
-
-**Why this finally works:**
-
-From the log every time:
-```
-DEBUG: Checking if cpu-features is already downloaded at .../src/cpu-features
-INFO: .../src/cpu-features directory not found   ← clone happens here
-INFO: cpu-features library downloaded            ← THEN cmake runs on unpatched files
-```
-
-By pre-creating `src/cpu-features/` with the patched `CMakeLists.txt`, the build script sees:
-```
-DEBUG: Checking if cpu-features is already downloaded at .../src/cpu-features
-INFO: cpu-features found, skipping download      ← uses OUR patched version
