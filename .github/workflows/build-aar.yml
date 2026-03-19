@@ -47,14 +47,8 @@ jobs:
 
           CMAKE_FILE="src/cpu-features/CMakeLists.txt"
 
-          echo "=== Searching for BUILD_TESTING and FetchContent ==="
-          grep -n 'BUILD_TESTING\|FetchContent\|googletest' "$CMAKE_FILE"
-
-          # Cut at the if(BUILD_TESTING) line, not at FetchContent
-          # This avoids cutting mid-block leaving unclosed if()
           CUT_LINE=$(grep -in 'build_testing\|fetchcontent' "$CMAKE_FILE" | head -1 | cut -d: -f1)
 
-          # Walk backwards to find the opening if() for this block
           while [ "$CUT_LINE" -gt 1 ]; do
             LINE_CONTENT=$(sed -n "${CUT_LINE}p" "$CMAKE_FILE")
             if echo "$LINE_CONTENT" | grep -qi '^\s*if\s*('; then
@@ -64,18 +58,39 @@ jobs:
           done
 
           echo "Cutting at line $CUT_LINE"
-          echo "Cut line content: $(sed -n "${CUT_LINE}p" $CMAKE_FILE)"
+          echo "Cut line: $(sed -n "${CUT_LINE}p" $CMAKE_FILE)"
 
           head -n $((CUT_LINE - 1)) "$CMAKE_FILE" > /tmp/cmake_patched.txt
-
           sed -i 's/cmake_minimum_required(VERSION [0-9][0-9.]*)/cmake_minimum_required(VERSION 3.5)/g' /tmp/cmake_patched.txt
-
           cp /tmp/cmake_patched.txt "$CMAKE_FILE"
 
           echo "=== Last 10 lines ==="
           tail -10 "$CMAKE_FILE"
           echo "Opens:  $(grep -o '(' $CMAKE_FILE | wc -l)"
           echo "Closes: $(grep -o ')' $CMAKE_FILE | wc -l)"
+
+      - name: Patch ffmpeg-kit JNI for clang 18 compatibility
+        run: |
+          ANDROID_MK="android/ffmpeg-kit-android-lib/src/main/cpp/Android.mk"
+
+          echo "=== Searching for LOCAL_CFLAGS in Android.mk ==="
+          grep -n "LOCAL_CFLAGS" "$ANDROID_MK" | head -10 || echo "No LOCAL_CFLAGS found"
+
+          if grep -q "LOCAL_CFLAGS\s*:=" "$ANDROID_MK"; then
+            sed -i 's/LOCAL_CFLAGS\s*:=/LOCAL_CFLAGS := -Wno-single-bit-bitfield-constant-conversion/' "$ANDROID_MK"
+          else
+            sed -i '/LOCAL_MODULE\b/a LOCAL_CFLAGS := -Wno-single-bit-bitfield-constant-conversion' "$ANDROID_MK"
+          fi
+
+          echo "=== After patch ==="
+          grep -n "LOCAL_CFLAGS" "$ANDROID_MK" | head -10
+
+          APP_MK="android/ffmpeg-kit-android-lib/src/main/cpp/Application.mk"
+          if [ -f "$APP_MK" ]; then
+            echo "APP_CFLAGS += -Wno-single-bit-bitfield-constant-conversion" >> "$APP_MK"
+            echo "=== Application.mk ==="
+            cat "$APP_MK"
+          fi
 
       - name: Build Universal AAR (4KB + 16KB compatible)
         run: |
