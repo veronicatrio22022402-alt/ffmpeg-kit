@@ -1,31 +1,25 @@
 name: Build FFmpegKit Universal AAR
-
 on:
   workflow_dispatch:
-
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
     steps:
       - name: Checkout ffmpeg-kit
         uses: actions/checkout@v4.2.2
-
       - name: Setup Java 11
         uses: actions/setup-java@v4.7.0
         with:
           java-version: '11'
           distribution: 'temurin'
-
       - name: Download NDK r27c
         run: |
           wget -q https://dl.google.com/android/repository/android-ndk-r27c-linux.zip -O ndk.zip
           unzip -q ndk.zip -d $HOME
           echo "ANDROID_NDK_ROOT=$HOME/android-ndk-r27c" >> $GITHUB_ENV
-
       - name: Install build dependencies
         run: |
           sudo apt-get update
@@ -37,18 +31,14 @@ jobs:
             meson ninja-build ragel groff \
             gtk-doc-tools libtasn1-6-dev \
             build-essential
-
       - name: Pre-clone cpu-features and remove googletest
         run: |
           mkdir -p src
           git clone --depth=1 --branch v0.8.0 \
             https://github.com/arthenica/cpu_features.git \
             src/cpu-features
-
           CMAKE_FILE="src/cpu-features/CMakeLists.txt"
-
           CUT_LINE=$(grep -in 'build_testing\|fetchcontent' "$CMAKE_FILE" | head -1 | cut -d: -f1)
-
           while [ "$CUT_LINE" -gt 1 ]; do
             LINE_CONTENT=$(sed -n "${CUT_LINE}p" "$CMAKE_FILE")
             if echo "$LINE_CONTENT" | grep -qi '^\s*if\s*('; then
@@ -56,43 +46,27 @@ jobs:
             fi
             CUT_LINE=$((CUT_LINE - 1))
           done
-
           echo "Cutting at line $CUT_LINE"
           echo "Cut line: $(sed -n "${CUT_LINE}p" $CMAKE_FILE)"
-
           head -n $((CUT_LINE - 1)) "$CMAKE_FILE" > /tmp/cmake_patched.txt
           sed -i 's/cmake_minimum_required(VERSION [0-9][0-9.]*)/cmake_minimum_required(VERSION 3.5)/g' /tmp/cmake_patched.txt
           cp /tmp/cmake_patched.txt "$CMAKE_FILE"
-
           echo "=== Last 10 lines ==="
           tail -10 "$CMAKE_FILE"
           echo "Opens:  $(grep -o '(' $CMAKE_FILE | wc -l)"
           echo "Closes: $(grep -o ')' $CMAKE_FILE | wc -l)"
-
       - name: Patch ffmpeg-kit JNI for clang 18 compatibility
         run: |
-          echo "=== Finding Android.mk ==="
-          find . -name "Android.mk" | head -10
-
-          ANDROID_MK=$(find . -name "Android.mk" | head -1)
-          echo "Found at: $ANDROID_MK"
-
-          if grep -q "LOCAL_CFLAGS" "$ANDROID_MK"; then
-            sed -i 's/LOCAL_CFLAGS\s*:=/LOCAL_CFLAGS := -Wno-single-bit-bitfield-constant-conversion /' "$ANDROID_MK"
-          else
-            sed -i '/LOCAL_MODULE\b/a LOCAL_CFLAGS := -Wno-single-bit-bitfield-constant-conversion' "$ANDROID_MK"
-          fi
-
-          echo "=== After patch ==="
-          grep -n "LOCAL_CFLAGS" "$ANDROID_MK"
-
-          APP_MK=$(find . -name "Application.mk" | head -1)
-          if [ -n "$APP_MK" ]; then
-            echo "APP_CFLAGS += -Wno-single-bit-bitfield-constant-conversion" >> "$APP_MK"
-            echo "=== Application.mk ==="
-            cat "$APP_MK"
-          fi
-
+          echo "=== Finding Android.mk and source files ==="
+          find . -name "Android.mk" | head -5
+          find . -name "fftools_ffmpeg_mux_init.c" | head -5
+          SRC=$(find . -name "fftools_ffmpeg_mux_init.c" | head -1)
+          echo "Patching: $SRC"
+          sed -i '293i #pragma clang diagnostic push' "$SRC"
+          sed -i '294i #pragma clang diagnostic ignored "-Wsingle-bit-bitfield-constant-conversion"' "$SRC"
+          sed -i '/{ ENC_STATS_AVG_BITRATE.*"abr".*},/a #pragma clang diagnostic pop' "$SRC"
+          echo "=== Lines 290-315 after patch ==="
+          sed -n '290,315p' "$SRC"
       - name: Build Universal AAR (4KB + 16KB compatible)
         run: |
           export LDFLAGS="-Wl,-z,max-page-size=16384"
@@ -104,12 +78,10 @@ jobs:
             --disable-x86 \
             --disable-x86-64
           cp prebuilt/bundle-android-aar/ffmpeg-kit/ffmpeg-kit.aar ffmpeg-kit-universal.aar
-
       - name: Print build.log on failure
         if: failure()
         run: |
           find . -name "build.log" -exec cat {} \;
-
       - name: Upload Universal AAR
         uses: actions/upload-artifact@v4.6.2
         with:
