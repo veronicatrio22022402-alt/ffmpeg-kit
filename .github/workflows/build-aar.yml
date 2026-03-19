@@ -38,29 +38,24 @@ jobs:
             gtk-doc-tools libtasn1-6-dev \
             build-essential
 
-      - name: Pre-clone cpu-features and patch CMakeLists.txt
+           - name: Pre-clone cpu-features and patch ALL CMakeLists.txt files
         run: |
-          # android.sh clones cpu-features into src/cpu-features/
-          # If the folder already exists it SKIPS the clone entirely
-          # So we pre-clone it here, patch the CMakeLists.txt, 
-          # and android.sh will use our patched version directly
-          
           mkdir -p src
           git clone --depth=1 --branch v0.8.0 \
             https://github.com/arthenica/cpu_features.git \
             src/cpu-features
 
-          echo "=== Before patch ==="
-          head -3 src/cpu-features/CMakeLists.txt
+          echo "=== All CMakeLists.txt files found ==="
+          find src/cpu-features -name "CMakeLists.txt"
 
-          # The fix cmake itself tells us to use
-          sed -i 's/cmake_minimum_required(VERSION [0-9][0-9.]*/cmake_minimum_required(VERSION 3.5/g' \
-            src/cpu-features/CMakeLists.txt
+          echo "=== Patching ALL of them ==="
+          find src/cpu-features -name "CMakeLists.txt" -exec \
+            sed -i 's/cmake_minimum_required(VERSION [0-9][0-9.]*/cmake_minimum_required(VERSION 3.5/g' {} \;
 
-          echo "=== After patch ==="
-          head -3 src/cpu-features/CMakeLists.txt
+          echo "=== Verifying patches ==="
+          find src/cpu-features -name "CMakeLists.txt" -exec grep "cmake_minimum_required" {} \;
 
-          echo "✅ cpu-features pre-cloned and patched"
+          echo "✅ All CMakeLists.txt files patched"
 
       - name: Build Universal AAR (4KB + 16KB compatible)
         run: |
