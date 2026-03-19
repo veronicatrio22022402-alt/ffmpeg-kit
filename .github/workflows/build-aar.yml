@@ -26,20 +26,6 @@ jobs:
           unzip -q ndk.zip -d $HOME
           echo "ANDROID_NDK_ROOT=$HOME/android-ndk-r27c" >> $GITHUB_ENV
 
-      - name: Patch cpu-features build script directly
-        run: |
-          # This is the ONE script that builds cpu-features with cmake
-          echo "=== Contents of cpu-features build script ==="
-          cat scripts/android/cpu-features.sh
-
-          echo ""
-          echo "=== Patching cmake call ==="
-          # Inject the policy flag into every cmake invocation in this script
-          sed -i 's/cmake /cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5 /g' scripts/android/cpu-features.sh
-
-          echo "=== Patched result ==="
-          cat scripts/android/cpu-features.sh
-
       - name: Install build dependencies
         run: |
           sudo apt-get update
@@ -51,6 +37,30 @@ jobs:
             meson ninja-build ragel groff \
             gtk-doc-tools libtasn1-6-dev \
             build-essential
+
+      - name: Pre-clone cpu-features and patch CMakeLists.txt
+        run: |
+          # android.sh clones cpu-features into src/cpu-features/
+          # If the folder already exists it SKIPS the clone entirely
+          # So we pre-clone it here, patch the CMakeLists.txt, 
+          # and android.sh will use our patched version directly
+          
+          mkdir -p src
+          git clone --depth=1 --branch v0.8.0 \
+            https://github.com/arthenica/cpu_features.git \
+            src/cpu-features
+
+          echo "=== Before patch ==="
+          head -3 src/cpu-features/CMakeLists.txt
+
+          # The fix cmake itself tells us to use
+          sed -i 's/cmake_minimum_required(VERSION [0-9][0-9.]*/cmake_minimum_required(VERSION 3.5/g' \
+            src/cpu-features/CMakeLists.txt
+
+          echo "=== After patch ==="
+          head -3 src/cpu-features/CMakeLists.txt
+
+          echo "✅ cpu-features pre-cloned and patched"
 
       - name: Build Universal AAR (4KB + 16KB compatible)
         run: |
@@ -81,3 +91,18 @@ jobs:
           name: ffmpeg-kit-universal
           path: ffmpeg-kit-universal.aar
           retention-days: 30
+```
+
+**Why this finally works:**
+
+From the log every time:
+```
+DEBUG: Checking if cpu-features is already downloaded at .../src/cpu-features
+INFO: .../src/cpu-features directory not found   ← clone happens here
+INFO: cpu-features library downloaded            ← THEN cmake runs on unpatched files
+```
+
+By pre-creating `src/cpu-features/` with the patched `CMakeLists.txt`, the build script sees:
+```
+DEBUG: Checking if cpu-features is already downloaded at .../src/cpu-features
+INFO: cpu-features found, skipping download      ← uses OUR patched version
