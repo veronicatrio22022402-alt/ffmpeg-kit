@@ -38,7 +38,7 @@ jobs:
             gtk-doc-tools libtasn1-6-dev \
             build-essential
 
-           - name: Pre-clone cpu-features and patch ALL CMakeLists.txt files
+      - name: Pre-clone cpu-features and patch ALL CMakeLists.txt files
         run: |
           mkdir -p src
           git clone --depth=1 --branch v0.8.0 \
