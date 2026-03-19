@@ -20,23 +20,28 @@ jobs:
           java-version: '11'
           distribution: 'temurin'
 
-      - name: Download NDK r27c (supports universal 4KB+16KB builds)
+      - name: Download NDK r27c
         run: |
           wget -q https://dl.google.com/android/repository/android-ndk-r27c-linux.zip -O ndk.zip
           unzip -q ndk.zip -d $HOME
           echo "ANDROID_NDK_ROOT=$HOME/android-ndk-r27c" >> $GITHUB_ENV
 
-      - name: Create cmake wrapper (fixes CMake 3.31 compatibility)
+      - name: Patch cpu-features build script to fix CMake 3.31 compatibility
         run: |
-          REAL_CMAKE=$(which cmake)
-          sudo mv $REAL_CMAKE /usr/local/bin/cmake-real
-          sudo tee /usr/local/bin/cmake > /dev/null << 'EOF'
-          #!/bin/bash
-          exec /usr/local/bin/cmake-real -DCMAKE_POLICY_VERSION_MINIMUM=3.5 "$@"
-          EOF
-          sudo chmod +x /usr/local/bin/cmake
-          which cmake
-          cmake --version
+          # Find the cpu-features build script inside ffmpeg-kit
+          echo "=== Searching for cpu-features build script ==="
+          find . -name "cpu-features.sh" | head -5
+          find . -name "*.sh" | xargs grep -l "cpu.features\|cpu_features" 2>/dev/null | head -10
+
+          # Patch every cmake invocation in any script to include the fix
+          find . -name "*.sh" | xargs grep -l "cmake" 2>/dev/null | while read f; do
+            echo "Patching cmake calls in: $f"
+            sed -i 's/cmake \(.*\)-DCMAKE_TOOLCHAIN/cmake \1-DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_TOOLCHAIN/g' "$f"
+            sed -i 's/cmake -DCMAKE/cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE/g' "$f"
+          done
+
+          echo "=== Verifying patch ==="
+          grep -r "CMAKE_POLICY_VERSION_MINIMUM" . --include="*.sh" | head -10
 
       - name: Install build dependencies
         run: |
@@ -52,9 +57,6 @@ jobs:
 
       - name: Build Universal AAR (4KB + 16KB compatible)
         run: |
-          # Inject 16KB page size linker flag so .so files work on
-          # both 4KB kernel devices (Poco F1, Android 5-14) AND
-          # 16KB kernel devices (Android 15+)
           export LDFLAGS="-Wl,-z,max-page-size=16384"
 
           ./android.sh \
