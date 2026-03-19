@@ -38,24 +38,27 @@ jobs:
             gtk-doc-tools libtasn1-6-dev \
             build-essential
 
-      - name: Pre-clone cpu-features and patch ALL CMakeLists.txt files
+      - name: Pre-clone cpu-features, patch CMakeLists + disable tests
         run: |
           mkdir -p src
           git clone --depth=1 --branch v0.8.0 \
             https://github.com/arthenica/cpu_features.git \
             src/cpu-features
 
-          echo "=== All CMakeLists.txt files found ==="
-          find src/cpu-features -name "CMakeLists.txt"
-
-          echo "=== Patching ALL of them ==="
+          echo "=== Patching ALL CMakeLists.txt files ==="
           find src/cpu-features -name "CMakeLists.txt" -exec \
             sed -i 's/cmake_minimum_required(VERSION [0-9][0-9.]*/cmake_minimum_required(VERSION 3.5/g' {} \;
 
-          echo "=== Verifying patches ==="
-          find src/cpu-features -name "CMakeLists.txt" -exec grep "cmake_minimum_required" {} \;
+          echo "=== Patching cpu-features build script to disable tests ==="
+          # This stops cmake from downloading googletest entirely
+          sed -i 's/cmake \(-D\)/cmake -DBUILD_TESTING=OFF \1/g' scripts/android/cpu-features.sh
+          # Fallback - catch cmake calls that don't start with -D
+          sed -i 's/cmake \(-DCMAKE_TOOLCHAIN\)/cmake -DBUILD_TESTING=OFF \1/g' scripts/android/cpu-features.sh
 
-          echo "✅ All CMakeLists.txt files patched"
+          echo "=== Verifying cmake call in build script ==="
+          grep "cmake" scripts/android/cpu-features.sh
+
+          echo "✅ Done"
 
       - name: Build Universal AAR (4KB + 16KB compatible)
         run: |
