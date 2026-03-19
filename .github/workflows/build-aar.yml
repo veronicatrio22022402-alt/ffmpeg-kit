@@ -47,8 +47,24 @@ jobs:
 
           CMAKE_FILE="src/cpu-features/CMakeLists.txt"
 
-          CUT_LINE=$(grep -in 'fetchcontent\|googletest' "$CMAKE_FILE" | head -1 | cut -d: -f1)
-          echo "Cutting at line $CUT_LINE of $(wc -l < $CMAKE_FILE) total lines"
+          echo "=== Searching for BUILD_TESTING and FetchContent ==="
+          grep -n 'BUILD_TESTING\|FetchContent\|googletest' "$CMAKE_FILE"
+
+          # Cut at the if(BUILD_TESTING) line, not at FetchContent
+          # This avoids cutting mid-block leaving unclosed if()
+          CUT_LINE=$(grep -in 'build_testing\|fetchcontent' "$CMAKE_FILE" | head -1 | cut -d: -f1)
+
+          # Walk backwards to find the opening if() for this block
+          while [ "$CUT_LINE" -gt 1 ]; do
+            LINE_CONTENT=$(sed -n "${CUT_LINE}p" "$CMAKE_FILE")
+            if echo "$LINE_CONTENT" | grep -qi '^\s*if\s*('; then
+              break
+            fi
+            CUT_LINE=$((CUT_LINE - 1))
+          done
+
+          echo "Cutting at line $CUT_LINE"
+          echo "Cut line content: $(sed -n "${CUT_LINE}p" $CMAKE_FILE)"
 
           head -n $((CUT_LINE - 1)) "$CMAKE_FILE" > /tmp/cmake_patched.txt
 
