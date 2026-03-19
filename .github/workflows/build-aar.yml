@@ -38,61 +38,80 @@ jobs:
             gtk-doc-tools libtasn1-6-dev \
             build-essential
 
-      - name: Pre-clone cpu-features and fix cmake compatibility
+      - name: Pre-clone cpu-features and surgically remove googletest
         run: |
           mkdir -p src
           git clone --depth=1 --branch v0.8.0 \
             https://github.com/arthenica/cpu_features.git \
             src/cpu-features
 
-          # Fix cmake_minimum_required - cmake 4.x hard-errors on VERSION < 3.5
-          sed -i \
-            's/cmake_minimum_required(VERSION [^)]*)/cmake_minimum_required(VERSION 3.5)/g' \
-            src/cpu-features/CMakeLists.txt
-
-          echo "=== cmake_minimum_required after patch ==="
-          grep cmake_minimum_required src/cpu-features/CMakeLists.txt
-
-          # Inject -DBUILD_TESTING=OFF into the cpu-features build script.
-          # All googletest/FetchContent calls live inside if(BUILD_TESTING),
-          # so cmake never enters that block and never downloads googletest.
           python3 << 'PYEOF'
-          import re, sys
+          import re
 
-          path = 'scripts/android/cpu-features.sh'
-          with open(path) as f:
+          with open('src/cpu-features/CMakeLists.txt', 'r') as f:
               content = f.read()
 
-          print("=== cmake lines BEFORE patch ===")
-          for i, line in enumerate(content.splitlines(), 1):
-              if re.match(r'\s*cmake[\s\\]', line):
-                  print(f"  {i}: {line}")
-
-          new_content = re.sub(
-              r'^(\s*cmake)(\s)',
-              r'\1 -DBUILD_TESTING=OFF\2',
-              content,
-              flags=re.MULTILINE
+          # Fix 1: cmake_minimum_required version
+          content = re.sub(
+              r'cmake_minimum_required\s*\(\s*VERSION\s+[0-9]+\.[0-9.]*\s*\)',
+              'cmake_minimum_required(VERSION 3.5)',
+              content
           )
 
-          if new_content == content:
-              print("ERROR: Pattern did not match any cmake invocation!", file=sys.stderr)
-              print("=== Full cpu-features.sh (for debugging) ===")
-              print(content)
-              sys.exit(1)
+          # Fix 2: Remove include(FetchContent)
+          content = re.sub(r'include\s*\(\s*FetchContent\s*\)', '', content)
 
-          with open(path, 'w') as f:
-              f.write(new_content)
+          # Fix 3: Remove multi-line FetchContent blocks for googletest
+          def remove_cmake_block(text, func_name):
+              result = []
+              i = 0
+              pattern = re.compile(r'[ \t]*' + re.escape(func_name) + r'\s*\(', re.IGNORECASE)
+              while i < len(text):
+                  m = pattern.match(text, i)
+                  if m:
+                      paren_start = m.end() - 1
+                      depth = 1
+                      j = paren_start + 1
+                      while j < len(text) and depth > 0:
+                          if text[j] == '(':
+                              depth += 1
+                          elif text[j] == ')':
+                              depth -= 1
+                          j += 1
+                      block = text[i:j]
+                      if 'googletest' in block.lower() or 'gtest' in block.lower():
+                          i = j
+                          while i < len(text) and text[i] in '\n\r':
+                              i += 1
+                          continue
+                  result.append(text[i])
+                  i += 1
+              return ''.join(result)
 
-          print("=== cmake lines AFTER patch ===")
-          for i, line in enumerate(new_content.splitlines(), 1):
-              if re.match(r'\s*cmake[\s\\]', line):
-                  print(f"  {i}: {line}")
+          content = remove_cmake_block(content, 'FetchContent_Declare')
+          content = remove_cmake_block(content, 'FetchContent_MakeAvailable')
 
-          print("Patched successfully!")
+          # Fix 4: Comment out any remaining gtest references
+          lines = content.split('\n')
+          clean = []
+          for line in lines:
+              if re.search(r'\bgtest\b|\bgoogletest\b', line, re.IGNORECASE) \
+                 and not line.strip().startswith('#'):
+                  clean.append('# ' + line)
+              else:
+                  clean.append(line)
+          content = '\n'.join(clean)
+
+          with open('src/cpu-features/CMakeLists.txt', 'w') as f:
+              f.write(content)
+
+          print("Patched successfully")
           PYEOF
 
-      - name: Build Universal AAR (4KB + 16KB page size compatible)
+          echo "=== Patched file lines 185-210 ==="
+          sed -n '185,210p' src/cpu-features/CMakeLists.txt
+
+      - name: Build Universal AAR (4KB + 16KB compatible)
         run: |
           export LDFLAGS="-Wl,-z,max-page-size=16384"
           ./android.sh \
