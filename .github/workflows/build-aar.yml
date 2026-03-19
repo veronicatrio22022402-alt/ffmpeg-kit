@@ -1,11 +1,62 @@
-- name: Build Universal AAR (works on both 4KB and 16KB devices)
+name: Build FFmpegKit Universal AAR
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Checkout ffmpeg-kit
+        uses: actions/checkout@v4.2.2
+
+      - name: Setup Java 11
+        uses: actions/setup-java@v4.7.0
+        with:
+          java-version: '11'
+          distribution: 'temurin'
+
+      - name: Download NDK r27c (supports universal 4KB+16KB builds)
         run: |
-          # Patch android.sh to inject the 16KB-compatible linker flag
-          # This makes .so files load on BOTH 4KB and 16KB kernel devices
-          sed -i 's/LDFLAGS=""/LDFLAGS="-Wl,-z,max-page-size=16384"/' android.sh 2>/dev/null || true
-          
+          wget -q https://dl.google.com/android/repository/android-ndk-r27c-linux.zip -O ndk.zip
+          unzip -q ndk.zip -d $HOME
+          echo "ANDROID_NDK_ROOT=$HOME/android-ndk-r27c" >> $GITHUB_ENV
+
+      - name: Create cmake wrapper (fixes CMake 3.31 compatibility)
+        run: |
+          REAL_CMAKE=$(which cmake)
+          sudo mv $REAL_CMAKE /usr/local/bin/cmake-real
+          sudo tee /usr/local/bin/cmake > /dev/null << 'EOF'
+          #!/bin/bash
+          exec /usr/local/bin/cmake-real -DCMAKE_POLICY_VERSION_MINIMUM=3.5 "$@"
+          EOF
+          sudo chmod +x /usr/local/bin/cmake
+          which cmake
+          cmake --version
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            autoconf automake libtool pkg-config \
+            curl git doxygen nasm \
+            gcc g++ gperf texinfo yasm \
+            bison autogen wget autopoint \
+            meson ninja-build ragel groff \
+            gtk-doc-tools libtasn1-6-dev \
+            build-essential
+
+      - name: Build Universal AAR (4KB + 16KB compatible)
+        run: |
+          # Inject 16KB page size linker flag so .so files work on
+          # both 4KB kernel devices (Poco F1, Android 5-14) AND
+          # 16KB kernel devices (Android 15+)
           export LDFLAGS="-Wl,-z,max-page-size=16384"
-          
+
           ./android.sh \
             --enable-gpl \
             --enable-x264 \
@@ -13,5 +64,21 @@
             --disable-arm-v7a-neon \
             --disable-x86 \
             --disable-x86-64
-          
+
           cp prebuilt/bundle-android-aar/ffmpeg-kit/ffmpeg-kit.aar ffmpeg-kit-universal.aar
+
+      - name: Print build.log on failure
+        if: failure()
+        run: |
+          echo "========== BUILD LOG =========="
+          find . -name "build.log" | while read f; do
+            echo "--- $f ---"
+            cat "$f"
+          done
+
+      - name: Upload Universal AAR
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: ffmpeg-kit-universal
+          path: ffmpeg-kit-universal.aar
+          retention-days: 30
