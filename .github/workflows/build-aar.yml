@@ -45,63 +45,75 @@ jobs:
             https://github.com/arthenica/cpu_features.git \
             src/cpu-features
 
-          echo "=== Original CMakeLists.txt around line 195-210 ==="
-          sed -n '190,215p' src/cpu-features/CMakeLists.txt
-
           python3 << 'PYEOF'
+          import re
+
           with open('src/cpu-features/CMakeLists.txt', 'r') as f:
               content = f.read()
 
-          # Fix cmake_minimum_required version
-          import re
+          # Fix 1: cmake_minimum_required version
           content = re.sub(
-              r'cmake_minimum_required\(VERSION [0-9]+\.[0-9.]*\)',
+              r'cmake_minimum_required\s*\(\s*VERSION\s+[0-9]+\.[0-9.]*\s*\)',
               'cmake_minimum_required(VERSION 3.5)',
               content
           )
 
-          # Remove the entire googletest FetchContent block
-          # It starts with FetchContent_Declare(googletest and ends after FetchContent_MakeAvailable
-          patterns_to_remove = [
-              # Remove FetchContent_Declare block for googletest
-              r'FetchContent_Declare\s*\(\s*googletest.*?\)',
-              # Remove FetchContent_MakeAvailable for googletest  
-              r'FetchContent_MakeAvailable\s*\(\s*googletest\s*\)',
-              # Remove include(FetchContent) if present
-              r'include\s*\(\s*FetchContent\s*\)',
-              # Remove add_subdirectory googletest
-              r'add_subdirectory\s*\([^\)]*googletest[^\)]*\)',
-          ]
+          # Fix 2: Remove include(FetchContent)
+          content = re.sub(r'include\s*\(\s*FetchContent\s*\)', '', content)
 
-          for pattern in patterns_to_remove:
-              content = re.sub(pattern, '# removed by build script', content, flags=re.DOTALL)
+          # Fix 3: Remove multi-line FetchContent blocks for googletest
+          def remove_cmake_block(text, func_name):
+              result = []
+              i = 0
+              pattern = re.compile(r'[ \t]*' + re.escape(func_name) + r'\s*\(', re.IGNORECASE)
+              while i < len(text):
+                  m = pattern.match(text, i)
+                  if m:
+                      paren_start = m.end() - 1
+                      depth = 1
+                      j = paren_start + 1
+                      while j < len(text) and depth > 0:
+                          if text[j] == '(':
+                              depth += 1
+                          elif text[j] == ')':
+                              depth -= 1
+                          j += 1
+                      block = text[i:j]
+                      if 'googletest' in block.lower() or 'gtest' in block.lower():
+                          i = j
+                          while i < len(text) and text[i] in '\n\r':
+                              i += 1
+                          continue
+                  result.append(text[i])
+                  i += 1
+              return ''.join(result)
 
-          # Also wrap any remaining googletest/gtest references in if(FALSE) block
-          # Find lines 195-210 area - the problematic section
+          content = remove_cmake_block(content, 'FetchContent_Declare')
+          content = remove_cmake_block(content, 'FetchContent_MakeAvailable')
+
+          # Fix 4: Comment out any remaining gtest references
           lines = content.split('\n')
-          new_lines = []
-          skip = False
+          clean = []
           for line in lines:
-              if 'FetchContent' in line or 'googletest' in line.lower() or 'gtest' in line.lower():
-                  new_lines.append('# ' + line + ' # disabled by build script')
+              if re.search(r'\bgtest\b|\bgoogletest\b', line, re.IGNORECASE) \
+                 and not line.strip().startswith('#'):
+                  clean.append('# ' + line)
               else:
-                  new_lines.append(line)
-
-          content = '\n'.join(new_lines)
+                  clean.append(line)
+          content = '\n'.join(clean)
 
           with open('src/cpu-features/CMakeLists.txt', 'w') as f:
               f.write(content)
 
-          print("✅ CMakeLists.txt patched successfully")
+          print("Patched successfully")
           PYEOF
 
-          echo "=== Patched CMakeLists.txt around line 195-210 ==="
-          sed -n '190,215p' src/cpu-features/CMakeLists.txt
+          echo "=== Patched file lines 185-210 ==="
+          sed -n '185,210p' src/cpu-features/CMakeLists.txt
 
       - name: Build Universal AAR (4KB + 16KB compatible)
         run: |
           export LDFLAGS="-Wl,-z,max-page-size=16384"
-
           ./android.sh \
             --enable-gpl \
             --enable-x264 \
@@ -109,17 +121,12 @@ jobs:
             --disable-arm-v7a-neon \
             --disable-x86 \
             --disable-x86-64
-
           cp prebuilt/bundle-android-aar/ffmpeg-kit/ffmpeg-kit.aar ffmpeg-kit-universal.aar
 
       - name: Print build.log on failure
         if: failure()
         run: |
-          echo "========== BUILD LOG =========="
-          find . -name "build.log" | while read f; do
-            echo "--- $f ---"
-            cat "$f"
-          done
+          find . -name "build.log" -exec cat {} \;
 
       - name: Upload Universal AAR
         uses: actions/upload-artifact@v4.6.2
