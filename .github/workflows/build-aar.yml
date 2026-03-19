@@ -26,30 +26,6 @@ jobs:
           unzip -q ndk.zip -d $HOME
           echo "ANDROID_NDK_ROOT=$HOME/android-ndk-r27c" >> $GITHUB_ENV
 
-      - name: Install cmake wrapper (Python-written, no heredoc indentation issues)
-        run: |
-          REAL_CMAKE=$(which cmake)
-          echo "Real cmake found at: $REAL_CMAKE"
-          sudo mv "$REAL_CMAKE" "${REAL_CMAKE}-real"
-
-          python3 -c "
-          import os, stat
-          wrapper = '#!/bin/bash\nexec \"${REAL_CMAKE}-real\" -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \"\$@\"\n'
-          path = '${REAL_CMAKE}'
-          with open(path, 'w') as f:
-              f.write(wrapper)
-          os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-          print('Wrapper written to: ' + path)
-          print('Content:')
-          print(open(path).read())
-          "
-
-          echo "=== Verifying wrapper ==="
-          which cmake
-          cmake --version
-          echo "=== First line of wrapper ==="
-          head -1 $(which cmake) | xxd | head -2
-
       - name: Install build dependencies
         run: |
           sudo apt-get update
@@ -62,17 +38,119 @@ jobs:
             gtk-doc-tools libtasn1-6-dev \
             build-essential
 
+      - name: Nuclear cmake fix - replace every cmake binary on the system
+        run: |
+          python3 << 'PYEOF'
+          import os, stat, subprocess
+
+          # Find every cmake binary on the system
+          result = subprocess.run(['find', '/usr', '/opt', '/home', '-name', 'cmake', '-type', 'f'],
+                                  capture_output=True, text=True)
+          cmake_paths = [p.strip() for p in result.stdout.strip().split('\n') if p.strip()]
+          print(f"Found cmake binaries: {cmake_paths}")
+
+          for cmake_path in cmake_paths:
+              real_path = cmake_path + '-real'
+              # Move original
+              os.rename(cmake_path, real_path)
+              # Write wrapper
+              wrapper = f'#!/bin/bash\nexec "{real_path}" -DCMAKE_POLICY_VERSION_MINIMUM=3.5 "$@"\n'
+              with open(cmake_path, 'w') as f:
+                  f.write(wrapper)
+              # Make executable
+              st = os.stat(cmake_path)
+              os.chmod(cmake_path, st.st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+              print(f"Wrapped: {cmake_path} -> {real_path}")
+              # Verify
+              with open(cmake_path) as f:
+                  content = f.read()
+              print(f"Content: {repr(content)}")
+
+          print("Done! Verifying...")
+          PYEOF
+
+          echo "=== cmake locations ==="
+          find /usr /opt -name "cmake" -o -name "cmake-real" 2>/dev/null | head -20
+          echo "=== cmake version ==="
+          cmake --version
+          echo "=== cmake path ==="
+          which cmake
+          echo "=== cmake first bytes ==="
+          xxd $(which cmake) | head -1
+
+      - name: Patch ffmpeg-kit cpu-features build script to add cmake flag
+        run: |
+          # Find the script that calls cmake for cpu-features
+          echo "=== Scripts that call cmake ==="
+          grep -rl "cmake" scripts/ 2>/dev/null || true
+
+          # Patch every cmake call in scripts/ to include the policy flag
+          find scripts/ -name "*.sh" -exec grep -l "cmake" {} \; | while read f; do
+            echo "Patching: $f"
+            # Add flag after every 'cmake ' invocation that doesn't already have it
+            sed -i 's/cmake \([^-]\)/cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \1/g' "$f"
+            sed -i 's/cmake -D\(CMAKE_[^P]\)/cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -D\1/g' "$f"
+            grep "cmake" "$f" | head -5
+          done
+
+          # Also patch the cpu-features CMakeLists.txt directly in the repo if it exists
+          find . -path "*/cpu*features*/CMakeLists.txt" | while read f; do
+            echo "Patching CMakeLists.txt: $f"
+            sed -i '1s/cmake_minimum_required(VERSION [0-9.]*/cmake_minimum_required(VERSION 3.5/' "$f"
+            head -3 "$f"
+          done
+
       - name: Build Universal AAR (4KB + 16KB compatible)
         run: |
           export LDFLAGS="-Wl,-z,max-page-size=16384"
 
-          ./android.sh \
-            --enable-gpl \
-            --enable-x264 \
-            --disable-arm-v7a \
-            --disable-arm-v7a-neon \
-            --disable-x86 \
-            --disable-x86-64
+          # Hook: after cpu-features is cloned, patch its CMakeLists.txt
+          # by wrapping android.sh to auto-patch on the fly
+          cat > /tmp/cmake-policy-hook.sh << 'EOF'
+          #!/bin/bash
+          # Patch any CMakeLists.txt that appears with old cmake_minimum_required
+          find . -name "CMakeLists.txt" -exec grep -l "cmake_minimum_required(VERSION [012]\." {} \; \
+            -exec sed -i 's/cmake_minimum_required(VERSION [0-9.]*/cmake_minimum_required(VERSION 3.5/' {} \; 2>/dev/null || true
+          EOF
+          chmod +x /tmp/cmake-policy-hook.sh
+
+          # Run build - also patch CMakeLists.txt mid-build via background watcher
+          python3 -c "
+          import subprocess, time, os, glob
+
+          def patch_cmake_files():
+              for f in glob.glob('src/**/**/CMakeLists.txt', recursive=True) + \
+                       glob.glob('.tmp/**/**/CMakeLists.txt', recursive=True):
+                  try:
+                      content = open(f).read()
+                      if 'cmake_minimum_required(VERSION 2.' in content or \
+                         'cmake_minimum_required(VERSION 0.' in content or \
+                         'cmake_minimum_required(VERSION 1.' in content:
+                          new = content.replace(
+                              'cmake_minimum_required(VERSION 2.',
+                              'cmake_minimum_required(VERSION 3.'
+                          )
+                          open(f, 'w').write(new)
+                          print(f'Patched: {f}')
+                  except:
+                      pass
+
+          import threading
+          def watcher():
+              for _ in range(300):  # watch for 5 minutes
+                  patch_cmake_files()
+                  time.sleep(1)
+
+          t = threading.Thread(target=watcher, daemon=True)
+          t.start()
+
+          result = subprocess.run(['./android.sh',
+              '--enable-gpl', '--enable-x264',
+              '--disable-arm-v7a', '--disable-arm-v7a-neon',
+              '--disable-x86', '--disable-x86-64'],
+              env={**os.environ, 'LDFLAGS': '-Wl,-z,max-page-size=16384'})
+          exit(result.returncode)
+          "
 
           cp prebuilt/bundle-android-aar/ffmpeg-kit/ffmpeg-kit.aar ffmpeg-kit-universal.aar
 
