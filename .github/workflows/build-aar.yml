@@ -38,27 +38,65 @@ jobs:
             gtk-doc-tools libtasn1-6-dev \
             build-essential
 
-      - name: Pre-clone cpu-features, patch CMakeLists + disable tests
+      - name: Pre-clone cpu-features and surgically remove googletest
         run: |
           mkdir -p src
           git clone --depth=1 --branch v0.8.0 \
             https://github.com/arthenica/cpu_features.git \
             src/cpu-features
 
-          echo "=== Patching ALL CMakeLists.txt files ==="
-          find src/cpu-features -name "CMakeLists.txt" -exec \
-            sed -i 's/cmake_minimum_required(VERSION [0-9][0-9.]*/cmake_minimum_required(VERSION 3.5/g' {} \;
+          echo "=== Original CMakeLists.txt around line 195-210 ==="
+          sed -n '190,215p' src/cpu-features/CMakeLists.txt
 
-          echo "=== Patching cpu-features build script to disable tests ==="
-          # This stops cmake from downloading googletest entirely
-          sed -i 's/cmake \(-D\)/cmake -DBUILD_TESTING=OFF \1/g' scripts/android/cpu-features.sh
-          # Fallback - catch cmake calls that don't start with -D
-          sed -i 's/cmake \(-DCMAKE_TOOLCHAIN\)/cmake -DBUILD_TESTING=OFF \1/g' scripts/android/cpu-features.sh
+          python3 << 'PYEOF'
+          with open('src/cpu-features/CMakeLists.txt', 'r') as f:
+              content = f.read()
 
-          echo "=== Verifying cmake call in build script ==="
-          grep "cmake" scripts/android/cpu-features.sh
+          # Fix cmake_minimum_required version
+          import re
+          content = re.sub(
+              r'cmake_minimum_required\(VERSION [0-9]+\.[0-9.]*\)',
+              'cmake_minimum_required(VERSION 3.5)',
+              content
+          )
 
-          echo "✅ Done"
+          # Remove the entire googletest FetchContent block
+          # It starts with FetchContent_Declare(googletest and ends after FetchContent_MakeAvailable
+          patterns_to_remove = [
+              # Remove FetchContent_Declare block for googletest
+              r'FetchContent_Declare\s*\(\s*googletest.*?\)',
+              # Remove FetchContent_MakeAvailable for googletest  
+              r'FetchContent_MakeAvailable\s*\(\s*googletest\s*\)',
+              # Remove include(FetchContent) if present
+              r'include\s*\(\s*FetchContent\s*\)',
+              # Remove add_subdirectory googletest
+              r'add_subdirectory\s*\([^\)]*googletest[^\)]*\)',
+          ]
+
+          for pattern in patterns_to_remove:
+              content = re.sub(pattern, '# removed by build script', content, flags=re.DOTALL)
+
+          # Also wrap any remaining googletest/gtest references in if(FALSE) block
+          # Find lines 195-210 area - the problematic section
+          lines = content.split('\n')
+          new_lines = []
+          skip = False
+          for line in lines:
+              if 'FetchContent' in line or 'googletest' in line.lower() or 'gtest' in line.lower():
+                  new_lines.append('# ' + line + ' # disabled by build script')
+              else:
+                  new_lines.append(line)
+
+          content = '\n'.join(new_lines)
+
+          with open('src/cpu-features/CMakeLists.txt', 'w') as f:
+              f.write(content)
+
+          print("✅ CMakeLists.txt patched successfully")
+          PYEOF
+
+          echo "=== Patched CMakeLists.txt around line 195-210 ==="
+          sed -n '190,215p' src/cpu-features/CMakeLists.txt
 
       - name: Build Universal AAR (4KB + 16KB compatible)
         run: |
