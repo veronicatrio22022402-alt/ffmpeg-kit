@@ -1,31 +1,31 @@
 name: Build FFmpegKit Universal AAR
- 
+
 on:
   workflow_dispatch:
- 
+
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
- 
+
     steps:
       - name: Checkout ffmpeg-kit
         uses: actions/checkout@v4.2.2
- 
+
       - name: Setup Java 11
         uses: actions/setup-java@v4.7.0
         with:
           java-version: '11'
           distribution: 'temurin'
- 
+
       - name: Download NDK r27c
         run: |
           wget -q https://dl.google.com/android/repository/android-ndk-r27c-linux.zip -O ndk.zip
           unzip -q ndk.zip -d $HOME
           echo "ANDROID_NDK_ROOT=$HOME/android-ndk-r27c" >> $GITHUB_ENV
- 
+
       - name: Install build dependencies
         run: |
           sudo apt-get update
@@ -37,63 +37,61 @@ jobs:
             meson ninja-build ragel groff \
             gtk-doc-tools libtasn1-6-dev \
             build-essential
- 
+
       - name: Pre-clone cpu-features and fix cmake compatibility
         run: |
           mkdir -p src
           git clone --depth=1 --branch v0.8.0 \
             https://github.com/arthenica/cpu_features.git \
             src/cpu-features
- 
-          # Fix 1: Patch cmake_minimum_required — cmake 4.x hard-errors on VERSION < 3.5
+
+          # Fix cmake_minimum_required - cmake 4.x hard-errors on VERSION < 3.5
           sed -i \
             's/cmake_minimum_required(VERSION [^)]*)/cmake_minimum_required(VERSION 3.5)/g' \
             src/cpu-features/CMakeLists.txt
- 
+
           echo "=== cmake_minimum_required after patch ==="
           grep cmake_minimum_required src/cpu-features/CMakeLists.txt
- 
-          # Fix 2: Inject -DBUILD_TESTING=OFF into the cpu-features build script.
-          # cpu-features wraps all googletest FetchContent calls inside an
-          # if(BUILD_TESTING) block, so disabling testing means cmake never
-          # enters that block and never tries to download googletest at all.
-          # No CMakeLists.txt surgery needed — no risk of broken parentheses.
+
+          # Inject -DBUILD_TESTING=OFF into the cpu-features build script.
+          # All googletest/FetchContent calls live inside if(BUILD_TESTING),
+          # so cmake never enters that block and never downloads googletest.
           python3 << 'PYEOF'
-import re, sys
- 
-path = 'scripts/android/cpu-features.sh'
-with open(path) as f:
-    content = f.read()
- 
-print("=== cmake lines BEFORE patch ===")
-for i, line in enumerate(content.splitlines(), 1):
-    if re.match(r'\s*cmake[\s\\]', line):
-        print(f"  {i}: {line}")
- 
-new_content = re.sub(
-    r'^(\s*cmake)(\s)',
-    r'\1 -DBUILD_TESTING=OFF\2',
-    content,
-    flags=re.MULTILINE
-)
- 
-if new_content == content:
-    print("ERROR: Pattern did not match any cmake invocation!", file=sys.stderr)
-    print("=== Full cpu-features.sh (for debugging) ===")
-    print(content)
-    sys.exit(1)
- 
-with open(path, 'w') as f:
-    f.write(new_content)
- 
-print("=== cmake lines AFTER patch ===")
-for i, line in enumerate(new_content.splitlines(), 1):
-    if re.match(r'\s*cmake[\s\\]', line):
-        print(f"  {i}: {line}")
- 
-print("Patched successfully!")
-PYEOF
- 
+          import re, sys
+
+          path = 'scripts/android/cpu-features.sh'
+          with open(path) as f:
+              content = f.read()
+
+          print("=== cmake lines BEFORE patch ===")
+          for i, line in enumerate(content.splitlines(), 1):
+              if re.match(r'\s*cmake[\s\\]', line):
+                  print(f"  {i}: {line}")
+
+          new_content = re.sub(
+              r'^(\s*cmake)(\s)',
+              r'\1 -DBUILD_TESTING=OFF\2',
+              content,
+              flags=re.MULTILINE
+          )
+
+          if new_content == content:
+              print("ERROR: Pattern did not match any cmake invocation!", file=sys.stderr)
+              print("=== Full cpu-features.sh (for debugging) ===")
+              print(content)
+              sys.exit(1)
+
+          with open(path, 'w') as f:
+              f.write(new_content)
+
+          print("=== cmake lines AFTER patch ===")
+          for i, line in enumerate(new_content.splitlines(), 1):
+              if re.match(r'\s*cmake[\s\\]', line):
+                  print(f"  {i}: {line}")
+
+          print("Patched successfully!")
+          PYEOF
+
       - name: Build Universal AAR (4KB + 16KB page size compatible)
         run: |
           export LDFLAGS="-Wl,-z,max-page-size=16384"
@@ -105,16 +103,15 @@ PYEOF
             --disable-x86 \
             --disable-x86-64
           cp prebuilt/bundle-android-aar/ffmpeg-kit/ffmpeg-kit.aar ffmpeg-kit-universal.aar
- 
+
       - name: Print build.log on failure
         if: failure()
         run: |
           find . -name "build.log" -exec cat {} \;
- 
+
       - name: Upload Universal AAR
         uses: actions/upload-artifact@v4.6.2
         with:
           name: ffmpeg-kit-universal
           path: ffmpeg-kit-universal.aar
           retention-days: 30
- 
