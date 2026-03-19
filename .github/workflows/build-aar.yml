@@ -26,22 +26,29 @@ jobs:
           unzip -q ndk.zip -d $HOME
           echo "ANDROID_NDK_ROOT=$HOME/android-ndk-r27c" >> $GITHUB_ENV
 
-      - name: Patch cpu-features build script to fix CMake 3.31 compatibility
+      - name: Install cmake wrapper (Python-written, no heredoc indentation issues)
         run: |
-          # Find the cpu-features build script inside ffmpeg-kit
-          echo "=== Searching for cpu-features build script ==="
-          find . -name "cpu-features.sh" | head -5
-          find . -name "*.sh" | xargs grep -l "cpu.features\|cpu_features" 2>/dev/null | head -10
+          REAL_CMAKE=$(which cmake)
+          echo "Real cmake found at: $REAL_CMAKE"
+          sudo mv "$REAL_CMAKE" "${REAL_CMAKE}-real"
 
-          # Patch every cmake invocation in any script to include the fix
-          find . -name "*.sh" | xargs grep -l "cmake" 2>/dev/null | while read f; do
-            echo "Patching cmake calls in: $f"
-            sed -i 's/cmake \(.*\)-DCMAKE_TOOLCHAIN/cmake \1-DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_TOOLCHAIN/g' "$f"
-            sed -i 's/cmake -DCMAKE/cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE/g' "$f"
-          done
+          python3 -c "
+          import os, stat
+          wrapper = '#!/bin/bash\nexec \"${REAL_CMAKE}-real\" -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \"\$@\"\n'
+          path = '${REAL_CMAKE}'
+          with open(path, 'w') as f:
+              f.write(wrapper)
+          os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+          print('Wrapper written to: ' + path)
+          print('Content:')
+          print(open(path).read())
+          "
 
-          echo "=== Verifying patch ==="
-          grep -r "CMAKE_POLICY_VERSION_MINIMUM" . --include="*.sh" | head -10
+          echo "=== Verifying wrapper ==="
+          which cmake
+          cmake --version
+          echo "=== First line of wrapper ==="
+          head -1 $(which cmake) | xxd | head -2
 
       - name: Install build dependencies
         run: |
