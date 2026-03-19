@@ -71,22 +71,23 @@ jobs:
 
       - name: Patch ffmpeg-kit JNI for clang 18 compatibility
         run: |
-          ANDROID_MK="android/ffmpeg-kit-android-lib/src/main/cpp/Android.mk"
+          echo "=== Finding Android.mk ==="
+          find . -name "Android.mk" | head -10
 
-          echo "=== Searching for LOCAL_CFLAGS in Android.mk ==="
-          grep -n "LOCAL_CFLAGS" "$ANDROID_MK" | head -10 || echo "No LOCAL_CFLAGS found"
+          ANDROID_MK=$(find . -name "Android.mk" | head -1)
+          echo "Found at: $ANDROID_MK"
 
-          if grep -q "LOCAL_CFLAGS\s*:=" "$ANDROID_MK"; then
-            sed -i 's/LOCAL_CFLAGS\s*:=/LOCAL_CFLAGS := -Wno-single-bit-bitfield-constant-conversion/' "$ANDROID_MK"
+          if grep -q "LOCAL_CFLAGS" "$ANDROID_MK"; then
+            sed -i 's/LOCAL_CFLAGS\s*:=/LOCAL_CFLAGS := -Wno-single-bit-bitfield-constant-conversion /' "$ANDROID_MK"
           else
             sed -i '/LOCAL_MODULE\b/a LOCAL_CFLAGS := -Wno-single-bit-bitfield-constant-conversion' "$ANDROID_MK"
           fi
 
           echo "=== After patch ==="
-          grep -n "LOCAL_CFLAGS" "$ANDROID_MK" | head -10
+          grep -n "LOCAL_CFLAGS" "$ANDROID_MK"
 
-          APP_MK="android/ffmpeg-kit-android-lib/src/main/cpp/Application.mk"
-          if [ -f "$APP_MK" ]; then
+          APP_MK=$(find . -name "Application.mk" | head -1)
+          if [ -n "$APP_MK" ]; then
             echo "APP_CFLAGS += -Wno-single-bit-bitfield-constant-conversion" >> "$APP_MK"
             echo "=== Application.mk ==="
             cat "$APP_MK"
