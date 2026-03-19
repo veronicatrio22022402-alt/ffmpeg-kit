@@ -38,78 +38,28 @@ jobs:
             gtk-doc-tools libtasn1-6-dev \
             build-essential
 
-      - name: Pre-clone cpu-features and surgically remove googletest
+      - name: Pre-clone cpu-features and remove googletest
         run: |
           mkdir -p src
           git clone --depth=1 --branch v0.8.0 \
             https://github.com/arthenica/cpu_features.git \
             src/cpu-features
 
-          python3 << 'PYEOF'
-          import re
+          CMAKE_FILE="src/cpu-features/CMakeLists.txt"
 
-          with open('src/cpu-features/CMakeLists.txt', 'r') as f:
-              content = f.read()
+          CUT_LINE=$(grep -in 'fetchcontent\|googletest' "$CMAKE_FILE" | head -1 | cut -d: -f1)
+          echo "Cutting at line $CUT_LINE of $(wc -l < $CMAKE_FILE) total lines"
 
-          # Fix 1: cmake_minimum_required version
-          content = re.sub(
-              r'cmake_minimum_required\s*\(\s*VERSION\s+[0-9]+\.[0-9.]*\s*\)',
-              'cmake_minimum_required(VERSION 3.5)',
-              content
-          )
+          head -n $((CUT_LINE - 1)) "$CMAKE_FILE" > /tmp/cmake_patched.txt
 
-          # Fix 2: Remove include(FetchContent)
-          content = re.sub(r'include\s*\(\s*FetchContent\s*\)', '', content)
+          sed -i 's/cmake_minimum_required(VERSION [0-9][0-9.]*)/cmake_minimum_required(VERSION 3.5)/g' /tmp/cmake_patched.txt
 
-          # Fix 3: Remove multi-line FetchContent blocks for googletest
-          def remove_cmake_block(text, func_name):
-              result = []
-              i = 0
-              pattern = re.compile(r'[ \t]*' + re.escape(func_name) + r'\s*\(', re.IGNORECASE)
-              while i < len(text):
-                  m = pattern.match(text, i)
-                  if m:
-                      paren_start = m.end() - 1
-                      depth = 1
-                      j = paren_start + 1
-                      while j < len(text) and depth > 0:
-                          if text[j] == '(':
-                              depth += 1
-                          elif text[j] == ')':
-                              depth -= 1
-                          j += 1
-                      block = text[i:j]
-                      if 'googletest' in block.lower() or 'gtest' in block.lower():
-                          i = j
-                          while i < len(text) and text[i] in '\n\r':
-                              i += 1
-                          continue
-                  result.append(text[i])
-                  i += 1
-              return ''.join(result)
+          cp /tmp/cmake_patched.txt "$CMAKE_FILE"
 
-          content = remove_cmake_block(content, 'FetchContent_Declare')
-          content = remove_cmake_block(content, 'FetchContent_MakeAvailable')
-
-          # Fix 4: Comment out any remaining gtest references
-          lines = content.split('\n')
-          clean = []
-          for line in lines:
-              if re.search(r'\bgtest\b|\bgoogletest\b', line, re.IGNORECASE) \
-                 and not line.strip().startswith('#'):
-                  clean.append('# ' + line)
-              else:
-                  clean.append(line)
-          content = '\n'.join(clean)
-
-          with open('src/cpu-features/CMakeLists.txt', 'w') as f:
-              f.write(content)
-
-          print("Patched successfully")
-          PYEOF
-
-          echo "=== Patched file lines 185-210 ==="
-          sed -n '185,210p' src/cpu-features/CMakeLists.txt
+          echo "=== Last 10 lines ==="
+          tail -10 "$CMAKE_FILE"
+          echo "Opens:  $(grep -o '(' $CMAKE_FILE | wc -l)"
+          echo "Closes: $(grep -o ')' $CMAKE_FILE | wc -l)"
 
       - name: Build Universal AAR (4KB + 16KB compatible)
         run: |
