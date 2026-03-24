@@ -1,25 +1,31 @@
 name: Build FFmpegKit Universal AAR
+
 on:
   workflow_dispatch:
+
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
     steps:
       - name: Checkout ffmpeg-kit
         uses: actions/checkout@v4.2.2
+
       - name: Setup Java 11
         uses: actions/setup-java@v4.7.0
         with:
           java-version: '11'
           distribution: 'temurin'
+
       - name: Download NDK r27c
         run: |
           wget -q https://dl.google.com/android/repository/android-ndk-r27c-linux.zip -O ndk.zip
           unzip -q ndk.zip -d $HOME
           echo "ANDROID_NDK_ROOT=$HOME/android-ndk-r27c" >> $GITHUB_ENV
+
       - name: Install build dependencies
         run: |
           sudo apt-get update
@@ -31,43 +37,107 @@ jobs:
             meson ninja-build ragel groff \
             gtk-doc-tools libtasn1-6-dev \
             build-essential
-      - name: Pre-clone cpu-features and remove googletest
+
+      - name: Pre-clone cpu-features and fix cmake compatibility
         run: |
           mkdir -p src
           git clone --depth=1 --branch v0.8.0 \
             https://github.com/arthenica/cpu_features.git \
             src/cpu-features
-          CMAKE_FILE="src/cpu-features/CMakeLists.txt"
-          CUT_LINE=$(grep -in 'build_testing\|fetchcontent' "$CMAKE_FILE" | head -1 | cut -d: -f1)
-          while [ "$CUT_LINE" -gt 1 ]; do
-            LINE_CONTENT=$(sed -n "${CUT_LINE}p" "$CMAKE_FILE")
-            if echo "$LINE_CONTENT" | grep -qi '^\s*if\s*('; then
-              break
-            fi
-            CUT_LINE=$((CUT_LINE - 1))
-          done
-          echo "Cutting at line $CUT_LINE"
-          echo "Cut line: $(sed -n "${CUT_LINE}p" $CMAKE_FILE)"
-          head -n $((CUT_LINE - 1)) "$CMAKE_FILE" > /tmp/cmake_patched.txt
-          sed -i 's/cmake_minimum_required(VERSION [0-9][0-9.]*)/cmake_minimum_required(VERSION 3.5)/g' /tmp/cmake_patched.txt
-          cp /tmp/cmake_patched.txt "$CMAKE_FILE"
-          echo "=== Last 10 lines ==="
-          tail -10 "$CMAKE_FILE"
-          echo "Opens:  $(grep -o '(' $CMAKE_FILE | wc -l)"
-          echo "Closes: $(grep -o ')' $CMAKE_FILE | wc -l)"
+
+          # Fix cmake_minimum_required - cmake 4.x hard-errors on VERSION < 3.5
+          sed -i \
+            's/cmake_minimum_required(VERSION [^)]*)/cmake_minimum_required(VERSION 3.5)/g' \
+            src/cpu-features/CMakeLists.txt
+
+          echo "=== cmake_minimum_required after patch ==="
+          grep cmake_minimum_required src/cpu-features/CMakeLists.txt
+
+          # Inject -DBUILD_TESTING=OFF into the cpu-features build script.
+          # All googletest/FetchContent calls live inside if(BUILD_TESTING),
+          # so cmake never enters that block and never downloads googletest.
+          python3 << 'PYEOF'
+          import re, sys
+
+          path = 'scripts/android/cpu-features.sh'
+          with open(path) as f:
+              content = f.read()
+
+          print("=== cmake lines BEFORE patch ===")
+          for i, line in enumerate(content.splitlines(), 1):
+              if re.match(r'\s*cmake[\s\\]', line):
+                  print(f"  {i}: {line}")
+
+          new_content = re.sub(
+              r'^(\s*cmake)(\s)',
+              r'\1 -DBUILD_TESTING=OFF\2',
+              content,
+              flags=re.MULTILINE
+          )
+
+          if new_content == content:
+              print("ERROR: Pattern did not match any cmake invocation!", file=sys.stderr)
+              print("=== Full cpu-features.sh (for debugging) ===")
+              print(content)
+              sys.exit(1)
+
+          with open(path, 'w') as f:
+              f.write(new_content)
+
+          print("=== cmake lines AFTER patch ===")
+          for i, line in enumerate(new_content.splitlines(), 1):
+              if re.match(r'\s*cmake[\s\\]', line):
+                  print(f"  {i}: {line}")
+
+          print("Patched successfully!")
+          PYEOF
+
       - name: Patch ffmpeg-kit JNI for clang 18 compatibility
         run: |
-          SRC=$(find . -name "fftools_ffmpeg_mux_init.c" | head -1)
-          echo "Patching: $SRC"
+          echo "=== Locating relevant files ==="
+          find . -name "Application.mk" 2>/dev/null
+          find . -name "fftools_ffmpeg_mux_init.c" 2>/dev/null
+          find . -name "*.sh" | xargs grep -l "ndk-build" 2>/dev/null | head -5
 
-          # Prepend warning suppression at the very top of the file
-          # This is safe - it only affects this one translation unit
-          echo '#pragma clang diagnostic ignored "-Wsingle-bit-bitfield-constant-conversion"' | \
-            cat - "$SRC" > /tmp/patched.c && mv /tmp/patched.c "$SRC"
+          # Patch 1: Prepend pragma to every copy of the offending source file.
+          # Prepending to the whole file is safer than targeting specific line
+          # numbers which shift after earlier sed insertions.
+          find . -name "fftools_ffmpeg_mux_init.c" | while read f; do
+            echo "Patching source: $f"
+            python3 - "$f" << 'PYEOF'
+          import sys
+          fname = sys.argv[1]
+          pragma = '#pragma clang diagnostic ignored "-Wsingle-bit-bitfield-constant-conversion"\n'
+          content = open(fname).read()
+          if pragma not in content:
+              open(fname, 'w').write(pragma + content)
+              print(f"  Prepended pragma to {fname}")
+          else:
+              print(f"  Pragma already present in {fname}")
+          PYEOF
+          done
 
-          echo "=== First 3 lines of patched file ==="
-          head -3 "$SRC"
-      - name: Build Universal AAR (4KB + 16KB compatible)
+          # Patch 2: Add the warning suppression flag to every Application.mk.
+          # This acts as a safety net in case the pragma doesn't reach the file.
+          find . -name "Application.mk" | while read f; do
+            echo "Patching Application.mk: $f"
+            if ! grep -q "Wno-single-bit-bitfield-constant-conversion" "$f"; then
+              echo 'APP_CFLAGS += -Wno-single-bit-bitfield-constant-conversion' >> "$f"
+            fi
+            cat "$f"
+          done
+
+          # Patch 3: Inject the flag directly into ndk-build calls in android.sh.
+          # Triple-patching ensures at least one layer reaches the compiler.
+          if grep -q "ndk-build" android.sh; then
+            sed -i 's/ndk-build\b/ndk-build APP_CFLAGS+="-Wno-single-bit-bitfield-constant-conversion"/g' android.sh
+            echo "=== ndk-build lines after patch ==="
+            grep "ndk-build" android.sh | head -5
+          else
+            echo "WARNING: ndk-build not found in android.sh"
+          fi
+
+      - name: Build Universal AAR (4KB + 16KB page size compatible)
         run: |
           export LDFLAGS="-Wl,-z,max-page-size=16384"
           ./android.sh \
@@ -78,10 +148,12 @@ jobs:
             --disable-x86 \
             --disable-x86-64
           cp prebuilt/bundle-android-aar/ffmpeg-kit/ffmpeg-kit.aar ffmpeg-kit-universal.aar
+
       - name: Print build.log on failure
         if: failure()
         run: |
           find . -name "build.log" -exec cat {} \;
+
       - name: Upload Universal AAR
         uses: actions/upload-artifact@v4.6.2
         with:
