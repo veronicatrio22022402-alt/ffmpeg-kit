@@ -52,59 +52,91 @@ jobs:
             's/cmake_minimum_required(VERSION [^)]*)/cmake_minimum_required(VERSION 3.5)/g' \
             "$CMAKE_FILE"
 
-          # Fix 2: Replace if(BUILD_TESTING) with if(FALSE) so cmake skips the
-          # entire googletest/FetchContent block without touching any parentheses.
-          # This is the safest possible approach — no block removal, no paren counting.
-          sed -i \
-            's/if\s*(BUILD_TESTING)/if(FALSE)/g' \
-            "$CMAKE_FILE"
+          # Fix 2: Replace if(BUILD_TESTING) with if(FALSE) — cmake skips the
+          # entire googletest/FetchContent block, parentheses stay balanced.
+          sed -i 's/if\s*(BUILD_TESTING)/if(FALSE)/g' "$CMAKE_FILE"
 
           echo "=== Verifying patches ==="
           grep -n "cmake_minimum_required\|BUILD_TESTING\|if(FALSE)" "$CMAKE_FILE"
-
-          echo "=== Parenthesis balance check ==="
           echo "Opens:  $(grep -o '(' "$CMAKE_FILE" | wc -l)"
           echo "Closes: $(grep -o ')' "$CMAKE_FILE" | wc -l)"
 
-      - name: Patch ffmpeg-kit JNI for clang 18 compatibility
+      - name: Patch all clang 18 / NDK r27c compatibility issues
         run: |
-          echo "=== Locating relevant files ==="
-          find . -name "Application.mk" 2>/dev/null
-          find . -name "fftools_ffmpeg_mux_init.c" 2>/dev/null
+          python3 << 'PYEOF'
+          import os, glob, subprocess, datetime
 
-          # Patch 1: Prepend pragma to every copy of the offending source file.
-          find . -name "fftools_ffmpeg_mux_init.c" | while read f; do
-            echo "Patching source: $f"
-            python3 - "$f" << 'PYEOF'
-          import sys
-          fname = sys.argv[1]
-          pragma = '#pragma clang diagnostic ignored "-Wsingle-bit-bitfield-constant-conversion"\n'
-          content = open(fname).read()
-          if pragma not in content:
-              open(fname, 'w').write(pragma + content)
-              print(f"  Prepended pragma to {fname}")
-          else:
-              print(f"  Pragma already present in {fname}")
+          BUILD_DATE = datetime.datetime.now().strftime('%Y%m%d')
+          print(f"BUILD_DATE = {BUILD_DATE}")
+
+          # Flags needed to silence all clang 18 new-as-errors
+          CFLAGS = [
+              '-Wno-pointer-sign',
+              '-Wno-single-bit-bitfield-constant-conversion',
+              f'-DFFMPEG_KIT_BUILD_DATE={BUILD_DATE}',
+          ]
+
+          def prepend_pragma(path, pragma_flag):
+              """Prepend a single #pragma to a C source file."""
+              pragma = f'#pragma clang diagnostic ignored "{pragma_flag}"\n'
+              content = open(path).read()
+              if pragma not in content:
+                  open(path, 'w').write(pragma + content)
+                  print(f"  Prepended pragma {pragma_flag} to {path}")
+              else:
+                  print(f"  Pragma already present in {path}")
+
+          def patch_mk_file(path, flags, marker):
+              """Append flag lines to a .mk file if not already present."""
+              content = open(path).read()
+              if marker in content:
+                  print(f"  Already patched: {path}")
+                  return
+              additions = '\n# Compatibility fixes for clang 18 / NDK r27c\n'
+              for flag in flags:
+                  additions += f'APP_CFLAGS += {flag}\n'
+              open(path, 'a').write(additions)
+              print(f"  Patched {path}")
+              print(open(path).read())
+
+          def patch_android_mk(path, flags, marker):
+              """Insert LOCAL_CFLAGS after each LOCAL_MODULE line."""
+              content = open(path).read()
+              if marker in content:
+                  print(f"  Already patched: {path}")
+                  return
+              flag_line = 'LOCAL_CFLAGS += ' + ' '.join(flags)
+              lines = content.splitlines(keepends=True)
+              out = []
+              for line in lines:
+                  out.append(line)
+                  if line.strip().startswith('LOCAL_MODULE') and ':=' in line:
+                      out.append(flag_line + '\n')
+              open(path, 'w').writelines(out)
+              print(f"  Patched {path}")
+
+          MARKER = 'clang 18'
+
+          # FIX A — Application.mk (broadest safety net)
+          for f in glob.glob('**/Application.mk', recursive=True):
+              patch_mk_file(f, CFLAGS, MARKER)
+
+          # FIX B — Android.mk (per-module LOCAL_CFLAGS)
+          for f in glob.glob('**/Android.mk', recursive=True):
+              patch_android_mk(f, CFLAGS, MARKER)
+
+          # FIX C — ffmpegkit.c (char* vs uint8_t* pointer-sign errors)
+          for f in glob.glob('**/ffmpegkit.c', recursive=True):
+              print(f"Source patch: {f}")
+              prepend_pragma(f, '-Wpointer-sign')
+
+          # FIX D — fftools_ffmpeg_mux_init.c (1-bit bitfield truncation errors)
+          for f in glob.glob('**/fftools_ffmpeg_mux_init.c', recursive=True):
+              print(f"Source patch: {f}")
+              prepend_pragma(f, '-Wsingle-bit-bitfield-constant-conversion')
+
+          print('\nAll patches applied successfully.')
           PYEOF
-          done
-
-          # Patch 2: Add flag to every Application.mk as a safety net.
-          find . -name "Application.mk" | while read f; do
-            echo "Patching Application.mk: $f"
-            if ! grep -q "Wno-single-bit-bitfield-constant-conversion" "$f"; then
-              echo 'APP_CFLAGS += -Wno-single-bit-bitfield-constant-conversion' >> "$f"
-            fi
-            cat "$f"
-          done
-
-          # Patch 3: Inject flag into ndk-build calls in android.sh.
-          if grep -q "ndk-build" android.sh; then
-            sed -i 's/ndk-build\b/ndk-build APP_CFLAGS+="-Wno-single-bit-bitfield-constant-conversion"/g' android.sh
-            echo "=== ndk-build lines after patch ==="
-            grep "ndk-build" android.sh | head -5
-          else
-            echo "WARNING: ndk-build not found in android.sh"
-          fi
 
       - name: Build Universal AAR (4KB + 16KB page size compatible)
         run: |
