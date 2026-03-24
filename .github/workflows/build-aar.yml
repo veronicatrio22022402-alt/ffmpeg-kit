@@ -57,16 +57,16 @@ jobs:
           echo "Closes: $(grep -o ')' $CMAKE_FILE | wc -l)"
       - name: Patch ffmpeg-kit JNI for clang 18 compatibility
         run: |
-          echo "=== Finding Android.mk and source files ==="
-          find . -name "Android.mk" | head -5
-          find . -name "fftools_ffmpeg_mux_init.c" | head -5
           SRC=$(find . -name "fftools_ffmpeg_mux_init.c" | head -1)
           echo "Patching: $SRC"
-          sed -i '293i #pragma clang diagnostic push' "$SRC"
-          sed -i '294i #pragma clang diagnostic ignored "-Wsingle-bit-bitfield-constant-conversion"' "$SRC"
-          sed -i '/{ ENC_STATS_AVG_BITRATE.*"abr".*},/a #pragma clang diagnostic pop' "$SRC"
-          echo "=== Lines 290-315 after patch ==="
-          sed -n '290,315p' "$SRC"
+
+          # Prepend warning suppression at the very top of the file
+          # This is safe - it only affects this one translation unit
+          echo '#pragma clang diagnostic ignored "-Wsingle-bit-bitfield-constant-conversion"' | \
+            cat - "$SRC" > /tmp/patched.c && mv /tmp/patched.c "$SRC"
+
+          echo "=== First 3 lines of patched file ==="
+          head -3 "$SRC"
       - name: Build Universal AAR (4KB + 16KB compatible)
         run: |
           export LDFLAGS="-Wl,-z,max-page-size=16384"
