@@ -137,10 +137,9 @@ jobs:
 
           print('\nAll patches applied successfully.')
           PYEOF
-
       - name: Build Universal AAR (4KB + 16KB page size compatible)
         run: |
-          export LDFLAGS="-Wl,-z,max-page-size=16384"
+          export LDFLAGS="-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
           ./android.sh \
             --enable-gpl \
             --enable-x264 \
