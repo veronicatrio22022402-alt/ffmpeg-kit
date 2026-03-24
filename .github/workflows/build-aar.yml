@@ -45,63 +45,34 @@ jobs:
             https://github.com/arthenica/cpu_features.git \
             src/cpu-features
 
-          # Fix cmake_minimum_required - cmake 4.x hard-errors on VERSION < 3.5
+          CMAKE_FILE="src/cpu-features/CMakeLists.txt"
+
+          # Fix 1: cmake 4.x hard-errors on cmake_minimum_required VERSION < 3.5
           sed -i \
             's/cmake_minimum_required(VERSION [^)]*)/cmake_minimum_required(VERSION 3.5)/g' \
-            src/cpu-features/CMakeLists.txt
+            "$CMAKE_FILE"
 
-          echo "=== cmake_minimum_required after patch ==="
-          grep cmake_minimum_required src/cpu-features/CMakeLists.txt
+          # Fix 2: Replace if(BUILD_TESTING) with if(FALSE) so cmake skips the
+          # entire googletest/FetchContent block without touching any parentheses.
+          # This is the safest possible approach — no block removal, no paren counting.
+          sed -i \
+            's/if\s*(BUILD_TESTING)/if(FALSE)/g' \
+            "$CMAKE_FILE"
 
-          # Inject -DBUILD_TESTING=OFF into the cpu-features build script.
-          # All googletest/FetchContent calls live inside if(BUILD_TESTING),
-          # so cmake never enters that block and never downloads googletest.
-          python3 << 'PYEOF'
-          import re, sys
+          echo "=== Verifying patches ==="
+          grep -n "cmake_minimum_required\|BUILD_TESTING\|if(FALSE)" "$CMAKE_FILE"
 
-          path = 'scripts/android/cpu-features.sh'
-          with open(path) as f:
-              content = f.read()
-
-          print("=== cmake lines BEFORE patch ===")
-          for i, line in enumerate(content.splitlines(), 1):
-              if re.match(r'\s*cmake[\s\\]', line):
-                  print(f"  {i}: {line}")
-
-          new_content = re.sub(
-              r'^(\s*cmake)(\s)',
-              r'\1 -DBUILD_TESTING=OFF\2',
-              content,
-              flags=re.MULTILINE
-          )
-
-          if new_content == content:
-              print("ERROR: Pattern did not match any cmake invocation!", file=sys.stderr)
-              print("=== Full cpu-features.sh (for debugging) ===")
-              print(content)
-              sys.exit(1)
-
-          with open(path, 'w') as f:
-              f.write(new_content)
-
-          print("=== cmake lines AFTER patch ===")
-          for i, line in enumerate(new_content.splitlines(), 1):
-              if re.match(r'\s*cmake[\s\\]', line):
-                  print(f"  {i}: {line}")
-
-          print("Patched successfully!")
-          PYEOF
+          echo "=== Parenthesis balance check ==="
+          echo "Opens:  $(grep -o '(' "$CMAKE_FILE" | wc -l)"
+          echo "Closes: $(grep -o ')' "$CMAKE_FILE" | wc -l)"
 
       - name: Patch ffmpeg-kit JNI for clang 18 compatibility
         run: |
           echo "=== Locating relevant files ==="
           find . -name "Application.mk" 2>/dev/null
           find . -name "fftools_ffmpeg_mux_init.c" 2>/dev/null
-          find . -name "*.sh" | xargs grep -l "ndk-build" 2>/dev/null | head -5
 
           # Patch 1: Prepend pragma to every copy of the offending source file.
-          # Prepending to the whole file is safer than targeting specific line
-          # numbers which shift after earlier sed insertions.
           find . -name "fftools_ffmpeg_mux_init.c" | while read f; do
             echo "Patching source: $f"
             python3 - "$f" << 'PYEOF'
@@ -117,8 +88,7 @@ jobs:
           PYEOF
           done
 
-          # Patch 2: Add the warning suppression flag to every Application.mk.
-          # This acts as a safety net in case the pragma doesn't reach the file.
+          # Patch 2: Add flag to every Application.mk as a safety net.
           find . -name "Application.mk" | while read f; do
             echo "Patching Application.mk: $f"
             if ! grep -q "Wno-single-bit-bitfield-constant-conversion" "$f"; then
@@ -127,8 +97,7 @@ jobs:
             cat "$f"
           done
 
-          # Patch 3: Inject the flag directly into ndk-build calls in android.sh.
-          # Triple-patching ensures at least one layer reaches the compiler.
+          # Patch 3: Inject flag into ndk-build calls in android.sh.
           if grep -q "ndk-build" android.sh; then
             sed -i 's/ndk-build\b/ndk-build APP_CFLAGS+="-Wno-single-bit-bitfield-constant-conversion"/g' android.sh
             echo "=== ndk-build lines after patch ==="
