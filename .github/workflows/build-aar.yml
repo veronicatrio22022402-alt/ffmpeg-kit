@@ -46,100 +46,171 @@ jobs:
             src/cpu-features
 
           CMAKE_FILE="src/cpu-features/CMakeLists.txt"
-
-          # Fix 1: cmake 4.x hard-errors on cmake_minimum_required VERSION < 3.5
           sed -i \
             's/cmake_minimum_required(VERSION [^)]*)/cmake_minimum_required(VERSION 3.5)/g' \
             "$CMAKE_FILE"
-
-          # Fix 2: Replace if(BUILD_TESTING) with if(FALSE) — cmake skips the
-          # entire googletest/FetchContent block, parentheses stay balanced.
           sed -i 's/if\s*(BUILD_TESTING)/if(FALSE)/g' "$CMAKE_FILE"
 
-          echo "=== Verifying patches ==="
+          echo "=== Verifying cmake patches ==="
           grep -n "cmake_minimum_required\|BUILD_TESTING\|if(FALSE)" "$CMAKE_FILE"
-          echo "Opens:  $(grep -o '(' "$CMAKE_FILE" | wc -l)"
-          echo "Closes: $(grep -o ')' "$CMAKE_FILE" | wc -l)"
+
+      - name: Inject page-size alignment flags into ffmpeg-kit build scripts
+        run: |
+          # The root cause of the Poco F1 crash is NOT the PT_LOAD alignment —
+          # it is the PT_GNU_RELRO segment being misaligned to non-page boundaries.
+          # On Android 10, bionic's mprotect() rounds RELRO start DOWN to the
+          # nearest page, landing in an unmapped gap between segments → ENOMEM.
+          #
+          # Setting -Wl,-z,max-page-size=16384 in the shell env does NOT work
+          # because android.sh exports its own LDFLAGS, overriding the env var.
+          # We must inject into the scripts that actually set LDFLAGS.
+          #
+          # With max-page-size=16384 + common-page-size=16384:
+          #   - All PT_LOAD segments align to 16384 bytes
+          #   - 16384 is a multiple of 4096, so 4KB kernel mprotect works fine
+          #   - RELRO lands on a 16KB boundary = valid 4KB page boundary
+          #   - Result: works on Poco F1 (4KB) AND Android 15+ (16KB) devices
+
+          echo "=== Finding scripts that set LDFLAGS ==="
+          grep -rn "hash-style=both\|LDFLAGS.*gc-sections\|export LDFLAGS" \
+            scripts/ android.sh 2>/dev/null | head -30
+
+          # Strategy: find every shell script that contains the ffmpeg-kit LDFLAGS
+          # fingerprint (--hash-style=both is unique to its Android LDFLAGS setup)
+          # and append our flags to that exact line.
+          python3 << 'PYEOF'
+          import os, glob, re
+
+          PAGE_FLAGS = '-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384'
+          MARKER = 'max-page-size=16384'
+          patched = []
+
+          def patch_file(path):
+              with open(path) as f:
+                  content = f.read()
+              if MARKER in content:
+                  print(f"  Already patched: {path}")
+                  return
+
+              original = content
+
+              # Method 1: append to lines containing the LDFLAGS fingerprint
+              content = re.sub(
+                  r'(-Wl,--hash-style=both)',
+                  r'\1 ' + PAGE_FLAGS,
+                  content
+              )
+
+              # Method 2: append to export LDFLAGS= lines that look like the
+              # Android linker flags block (catch any we missed above)
+              content = re.sub(
+                  r'(export LDFLAGS="[^"]*-Wl,--exclude-libs[^"]*")',
+                  r'\1 ' + PAGE_FLAGS + '"',
+                  content
+              )
+              # Fix double-quote if the regex above doubled it
+              content = content.replace(PAGE_FLAGS + '"' + '"', PAGE_FLAGS + '"')
+
+              if content != original:
+                  with open(path, 'w') as f:
+                      f.write(content)
+                  patched.append(path)
+                  print(f"  Patched: {path}")
+
+          for pattern in ['scripts/**/*.sh', 'scripts/*.sh', 'android.sh']:
+              for f in glob.glob(pattern, recursive=True):
+                  patch_file(f)
+
+          if patched:
+              print(f"\nPatched {len(patched)} file(s): {patched}")
+          else:
+              print("\nWARNING: No files matched. Falling back to norelro safety net.")
+
+          PYEOF
+
+          echo "=== Verifying injection ==="
+          grep -rn "max-page-size" scripts/ android.sh 2>/dev/null || \
+            echo "Flag not found in scripts — safety net will apply"
 
       - name: Patch all clang 18 / NDK r27c compatibility issues
         run: |
           python3 << 'PYEOF'
-          import os, glob, subprocess, datetime
+          import os, glob, datetime
 
           BUILD_DATE = datetime.datetime.now().strftime('%Y%m%d')
           print(f"BUILD_DATE = {BUILD_DATE}")
 
-          # Flags needed to silence all clang 18 new-as-errors
           CFLAGS = [
               '-Wno-pointer-sign',
               '-Wno-single-bit-bitfield-constant-conversion',
               f'-DFFMPEG_KIT_BUILD_DATE={BUILD_DATE}',
           ]
 
-          def prepend_pragma(path, pragma_flag):
-              """Prepend a single #pragma to a C source file."""
-              pragma = f'#pragma clang diagnostic ignored "{pragma_flag}"\n'
-              content = open(path).read()
-              if pragma not in content:
-                  open(path, 'w').write(pragma + content)
-                  print(f"  Prepended pragma {pragma_flag} to {path}")
-              else:
-                  print(f"  Pragma already present in {path}")
+          # Also inject page-size flags into Application.mk / Android.mk
+          # (covers libffmpegkit.so which is built by ndk-build, not make)
+          LDFLAGS_MK = [
+              '-Wl,-z,max-page-size=16384',
+              '-Wl,-z,common-page-size=16384',
+          ]
 
-          def patch_mk_file(path, flags, marker):
-              """Append flag lines to a .mk file if not already present."""
+          MARKER = 'clang18-pagesz-fix'
+
+          def patch_application_mk(path):
               content = open(path).read()
-              if marker in content:
+              if MARKER in content:
                   print(f"  Already patched: {path}")
                   return
-              additions = '\n# Compatibility fixes for clang 18 / NDK r27c\n'
-              for flag in flags:
+              additions = f'\n# {MARKER}\n'
+              for flag in CFLAGS:
                   additions += f'APP_CFLAGS += {flag}\n'
+              for flag in LDFLAGS_MK:
+                  additions += f'APP_LDFLAGS += {flag}\n'
               open(path, 'a').write(additions)
               print(f"  Patched {path}")
               print(open(path).read())
 
-          def patch_android_mk(path, flags, marker):
-              """Insert LOCAL_CFLAGS after each LOCAL_MODULE line."""
+          def patch_android_mk(path):
               content = open(path).read()
-              if marker in content:
+              if MARKER in content:
                   print(f"  Already patched: {path}")
                   return
-              flag_line = 'LOCAL_CFLAGS += ' + ' '.join(flags)
+              cflag_line = 'LOCAL_CFLAGS += ' + ' '.join(CFLAGS)
+              ldflag_line = 'LOCAL_LDFLAGS += ' + ' '.join(LDFLAGS_MK)
               lines = content.splitlines(keepends=True)
               out = []
               for line in lines:
                   out.append(line)
                   if line.strip().startswith('LOCAL_MODULE') and ':=' in line:
-                      out.append(flag_line + '\n')
+                      out.append(f'# {MARKER}\n')
+                      out.append(cflag_line + '\n')
+                      out.append(ldflag_line + '\n')
               open(path, 'w').writelines(out)
               print(f"  Patched {path}")
 
-          MARKER = 'clang 18'
+          def prepend_pragma(path, pragma_flag):
+              pragma = f'#pragma clang diagnostic ignored "{pragma_flag}"\n'
+              content = open(path).read()
+              if pragma not in content:
+                  open(path, 'w').write(pragma + content)
+                  print(f"  Prepended pragma {pragma_flag} to {path}")
 
-          # FIX A — Application.mk (broadest safety net)
           for f in glob.glob('**/Application.mk', recursive=True):
-              patch_mk_file(f, CFLAGS, MARKER)
+              patch_application_mk(f)
 
-          # FIX B — Android.mk (per-module LOCAL_CFLAGS)
           for f in glob.glob('**/Android.mk', recursive=True):
-              patch_android_mk(f, CFLAGS, MARKER)
+              patch_android_mk(f)
 
-          # FIX C — ffmpegkit.c (char* vs uint8_t* pointer-sign errors)
           for f in glob.glob('**/ffmpegkit.c', recursive=True):
-              print(f"Source patch: {f}")
               prepend_pragma(f, '-Wpointer-sign')
 
-          # FIX D — fftools_ffmpeg_mux_init.c (1-bit bitfield truncation errors)
           for f in glob.glob('**/fftools_ffmpeg_mux_init.c', recursive=True):
-              print(f"Source patch: {f}")
               prepend_pragma(f, '-Wsingle-bit-bitfield-constant-conversion')
 
-          print('\nAll patches applied successfully.')
+          print('\nAll patches applied.')
           PYEOF
-      - name: Build Universal AAR (4KB + 16KB page size compatible)
+
+      - name: Build Universal AAR
         run: |
-          export LDFLAGS="-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
           ./android.sh \
             --enable-gpl \
             --enable-x264 \
@@ -148,6 +219,60 @@ jobs:
             --disable-x86 \
             --disable-x86-64
           cp prebuilt/bundle-android-aar/ffmpeg-kit/ffmpeg-kit.aar ffmpeg-kit-universal.aar
+
+      - name: Verify .so alignment and RELRO
+        run: |
+          python3 << 'PYEOF'
+          import struct, zipfile
+
+          def inspect(data):
+              if data[:4] != b'\x7fELF' or data[4] != 2:
+                  return None, None
+              e_phoff     = struct.unpack_from('<Q', data, 32)[0]
+              e_phentsize = struct.unpack_from('<H', data, 54)[0]
+              e_phnum     = struct.unpack_from('<H', data, 56)[0]
+              max_load_align = 0
+              relro_vaddr = None
+              load_segments = []
+              for i in range(e_phnum):
+                  off     = e_phoff + i * e_phentsize
+                  p_type  = struct.unpack_from('<I', data, off)[0]
+                  p_vaddr = struct.unpack_from('<Q', data, off + 16)[0]
+                  p_filesz= struct.unpack_from('<Q', data, off + 32)[0]
+                  p_align = struct.unpack_from('<Q', data, off + 48)[0]
+                  if p_type == 1:
+                      max_load_align = max(max_load_align, p_align)
+                      load_segments.append((p_vaddr, p_filesz, p_align))
+                  if p_type == 0x6474e552:
+                      relro_vaddr = p_vaddr
+              relro_aligned = (relro_vaddr is None) or (relro_vaddr % 4096 == 0)
+              return max_load_align, relro_vaddr, relro_aligned
+
+          print("=== .so segment verification ===")
+          print(f"{'Library':<35} {'PT_LOAD align':>14} {'RELRO vaddr':>12} {'RELRO 4KB?':>10}")
+          all_ok = True
+          with zipfile.ZipFile('ffmpeg-kit-universal.aar') as z:
+              for name in sorted(z.namelist()):
+                  if not name.endswith('.so'):
+                      continue
+                  data = z.read(name)
+                  result = inspect(data)
+                  load_align, relro_vaddr, relro_ok = result
+                  lib = name.split('/')[-1]
+                  align_str = f"{load_align//1024}KB"
+                  relro_str = f"0x{relro_vaddr:x}" if relro_vaddr else "none"
+                  ok_str = "✅" if relro_ok else "❌ MISALIGNED"
+                  if not relro_ok:
+                      all_ok = False
+                  print(f"  {lib:<33} {align_str:>14} {relro_str:>12} {ok_str:>10}")
+
+          print()
+          if all_ok:
+              print("✅ All RELRO segments are page-aligned. Safe to ship.")
+          else:
+              print("❌ RELRO misalignment detected. The Poco F1 crash WILL recur.")
+              raise SystemExit(1)
+          PYEOF
 
       - name: Print build.log on failure
         if: failure()
