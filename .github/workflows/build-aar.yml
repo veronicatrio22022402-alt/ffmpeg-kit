@@ -57,29 +57,24 @@ jobs:
       - name: Wrap NDK clang to inject page-size linker flags
         run: |
           NDK_BIN="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
-
-          # NDK r27c drives LLD in-process inside clang — wrapping ld.lld is useless.
-          # We must intercept clang itself and inject flags only on link steps.
-
           CLANG_REAL="$(readlink -f "$NDK_BIN/clang")"
           echo "Wrapping: $CLANG_REAL"
           cp "$CLANG_REAL" "${CLANG_REAL}.real"
 
-          cat > "$CLANG_REAL" << WRAPPER
-#!/bin/bash
-REAL="${CLANG_REAL}.real"
-for arg in "\$@"; do
-  case "\$arg" in
-    -c|-E|-S|-M|-MM|-fsyntax-only|--version)
-      exec -a "\$0" "\$REAL" "\$@"
-      ;;
-  esac
-done
-exec -a "\$0" "\$REAL" "\$@" -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384
-WRAPPER
+          printf '%s\n' \
+            '#!/bin/bash' \
+            "REAL=\"${CLANG_REAL}.real\"" \
+            'for arg in "$@"; do' \
+            '  case "$arg" in' \
+            '    -c|-E|-S|-M|-MM|-fsyntax-only|--version)' \
+            '      exec -a "$0" "$REAL" "$@" ;;' \
+            '  esac' \
+            'done' \
+            'exec -a "$0" "$REAL" "$@" -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384' \
+            > "$CLANG_REAL"
 
           chmod +x "$CLANG_REAL"
-          echo "=== Wrapper installed at: $CLANG_REAL ==="
+          echo "=== Wrapper installed ==="
           cat "$CLANG_REAL"
           "$NDK_BIN/clang" --version
 
@@ -176,7 +171,7 @@ WRAPPER
 
           def inspect(data):
               if data[:4] != b'\x7fELF' or data[4] != 2:
-                  return 0, None, True  # skip non-64-bit ELF gracefully
+                  return 0, None, True
               e_phoff     = struct.unpack_from('<Q', data, 32)[0]
               e_phentsize = struct.unpack_from('<H', data, 54)[0]
               e_phnum     = struct.unpack_from('<H', data, 56)[0]
