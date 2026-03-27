@@ -227,7 +227,7 @@ jobs:
 
           def inspect(data):
               if data[:4] != b'\x7fELF' or data[4] != 2:
-                  return None, None
+                 return 0, None, True 
               e_phoff     = struct.unpack_from('<Q', data, 32)[0]
               e_phentsize = struct.unpack_from('<H', data, 54)[0]
               e_phnum     = struct.unpack_from('<H', data, 56)[0]
