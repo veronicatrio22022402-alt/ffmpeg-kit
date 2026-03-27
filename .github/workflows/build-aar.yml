@@ -54,83 +54,34 @@ jobs:
           echo "=== Verifying cmake patches ==="
           grep -n "cmake_minimum_required\|BUILD_TESTING\|if(FALSE)" "$CMAKE_FILE"
 
-      - name: Inject page-size alignment flags into ffmpeg-kit build scripts
+      - name: Wrap NDK clang to inject page-size linker flags
         run: |
-          # The root cause of the Poco F1 crash is NOT the PT_LOAD alignment —
-          # it is the PT_GNU_RELRO segment being misaligned to non-page boundaries.
-          # On Android 10, bionic's mprotect() rounds RELRO start DOWN to the
-          # nearest page, landing in an unmapped gap between segments → ENOMEM.
-          #
-          # Setting -Wl,-z,max-page-size=16384 in the shell env does NOT work
-          # because android.sh exports its own LDFLAGS, overriding the env var.
-          # We must inject into the scripts that actually set LDFLAGS.
-          #
-          # With max-page-size=16384 + common-page-size=16384:
-          #   - All PT_LOAD segments align to 16384 bytes
-          #   - 16384 is a multiple of 4096, so 4KB kernel mprotect works fine
-          #   - RELRO lands on a 16KB boundary = valid 4KB page boundary
-          #   - Result: works on Poco F1 (4KB) AND Android 15+ (16KB) devices
+          NDK_BIN="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
 
-          echo "=== Finding scripts that set LDFLAGS ==="
-          grep -rn "hash-style=both\|LDFLAGS.*gc-sections\|export LDFLAGS" \
-            scripts/ android.sh 2>/dev/null | head -30
+          # NDK r27c drives LLD in-process inside clang — wrapping ld.lld is useless.
+          # We must intercept clang itself and inject flags only on link steps.
 
-          # Strategy: find every shell script that contains the ffmpeg-kit LDFLAGS
-          # fingerprint (--hash-style=both is unique to its Android LDFLAGS setup)
-          # and append our flags to that exact line.
-          python3 << 'PYEOF'
-          import os, glob, re
+          CLANG_REAL="$(readlink -f "$NDK_BIN/clang")"
+          echo "Wrapping: $CLANG_REAL"
+          cp "$CLANG_REAL" "${CLANG_REAL}.real"
 
-          PAGE_FLAGS = '-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384'
-          MARKER = 'max-page-size=16384'
-          patched = []
+          cat > "$CLANG_REAL" << WRAPPER
+#!/bin/bash
+REAL="${CLANG_REAL}.real"
+for arg in "\$@"; do
+  case "\$arg" in
+    -c|-E|-S|-M|-MM|-fsyntax-only|--version)
+      exec -a "\$0" "\$REAL" "\$@"
+      ;;
+  esac
+done
+exec -a "\$0" "\$REAL" "\$@" -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384
+WRAPPER
 
-          def patch_file(path):
-              with open(path) as f:
-                  content = f.read()
-              if MARKER in content:
-                  print(f"  Already patched: {path}")
-                  return
-
-              original = content
-
-              # Method 1: append to lines containing the LDFLAGS fingerprint
-              content = re.sub(
-                  r'(-Wl,--hash-style=both)',
-                  r'\1 ' + PAGE_FLAGS,
-                  content
-              )
-
-              # Method 2: append to export LDFLAGS= lines that look like the
-              # Android linker flags block (catch any we missed above)
-              content = re.sub(
-                  r'(export LDFLAGS="[^"]*-Wl,--exclude-libs[^"]*")',
-                  r'\1 ' + PAGE_FLAGS + '"',
-                  content
-              )
-              # Fix double-quote if the regex above doubled it
-              content = content.replace(PAGE_FLAGS + '"' + '"', PAGE_FLAGS + '"')
-
-              if content != original:
-                  with open(path, 'w') as f:
-                      f.write(content)
-                  patched.append(path)
-                  print(f"  Patched: {path}")
-
-          for pattern in ['scripts/**/*.sh', 'scripts/*.sh', 'android.sh']:
-              for f in glob.glob(pattern, recursive=True):
-                  patch_file(f)
-
-          if patched:
-              print(f"\nPatched {len(patched)} file(s): {patched}")
-          else:
-              print("\nWARNING: No files matched. Falling back to norelro safety net.")
-
-          PYEOF
-
-          echo "=== Verifying injection ==="
-          grep -rn "max-page-size" scripts/ android.sh 2>/dev/null || \
-            echo "Flag not found in scripts — safety net will apply"
+          chmod +x "$CLANG_REAL"
+          echo "=== Wrapper installed at: $CLANG_REAL ==="
+          cat "$CLANG_REAL"
+          "$NDK_BIN/clang" --version
 
       - name: Patch all clang 18 / NDK r27c compatibility issues
         run: |
@@ -146,8 +97,6 @@ jobs:
               f'-DFFMPEG_KIT_BUILD_DATE={BUILD_DATE}',
           ]
 
-          # Also inject page-size flags into Application.mk / Android.mk
-          # (covers libffmpegkit.so which is built by ndk-build, not make)
           LDFLAGS_MK = [
               '-Wl,-z,max-page-size=16384',
               '-Wl,-z,common-page-size=16384',
@@ -227,7 +176,7 @@ jobs:
 
           def inspect(data):
               if data[:4] != b'\x7fELF' or data[4] != 2:
-                 return 0, None, True 
+                  return 0, None, True  # skip non-64-bit ELF gracefully
               e_phoff     = struct.unpack_from('<Q', data, 32)[0]
               e_phentsize = struct.unpack_from('<H', data, 54)[0]
               e_phnum     = struct.unpack_from('<H', data, 56)[0]
@@ -256,21 +205,20 @@ jobs:
                   if not name.endswith('.so'):
                       continue
                   data = z.read(name)
-                  result = inspect(data)
-                  load_align, relro_vaddr, relro_ok = result
+                  load_align, relro_vaddr, relro_ok = inspect(data)
                   lib = name.split('/')[-1]
-                  align_str = f"{load_align//1024}KB"
+                  align_str = f"{load_align//1024}KB" if load_align >= 1024 else f"{load_align}B"
                   relro_str = f"0x{relro_vaddr:x}" if relro_vaddr else "none"
-                  ok_str = "✅" if relro_ok else "❌ MISALIGNED"
+                  ok_str = "OK" if relro_ok else "MISALIGNED"
                   if not relro_ok:
                       all_ok = False
                   print(f"  {lib:<33} {align_str:>14} {relro_str:>12} {ok_str:>10}")
 
           print()
           if all_ok:
-              print("✅ All RELRO segments are page-aligned. Safe to ship.")
+              print("All RELRO segments are page-aligned. Safe to ship.")
           else:
-              print("❌ RELRO misalignment detected. The Poco F1 crash WILL recur.")
+              print("RELRO misalignment detected. The Poco F1 crash WILL recur.")
               raise SystemExit(1)
           PYEOF
 
