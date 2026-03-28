@@ -57,10 +57,22 @@ jobs:
           python3 << 'PYEOF'
           import re, glob
 
-          PAGE_FLAGS = '-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384'
+          # These two flags together make every .so universal:
+          #   max-page-size=16384  → PT_LOAD segments align to 16KB boundaries
+          #   common-page-size=16384 → .bss / common data align to 16KB
+          # 16KB is a multiple of 4KB, so mprotect() for GNU RELRO works on
+          # both 4KB kernels (Poco F1, Android 5-14) and 16KB kernels (Android 15+).
+          #
+          # IMPORTANT: export LDFLAGS in the shell env does NOT work — android.sh
+          # exports its own LDFLAGS internally, overriding the env var.
+          # We inject into the lines containing "--hash-style=both" which is the
+          # unique fingerprint of the LDFLAGS string android.sh assembles internally.
+          # That string is what actually reaches the linker for every .so file.
 
+          PAGE_FLAGS = '-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384'
           targets = glob.glob('scripts/**/*.sh', recursive=True) + ['android.sh']
           patched = []
+
           for f in targets:
               try:
                   content = open(f).read()
@@ -77,19 +89,20 @@ jobs:
 
           if patched:
               print(f"\nInjected page-size flags into {len(patched)} file(s).")
+              for f in patched:
+                  for i, line in enumerate(open(f).read().splitlines(), 1):
+                      if 'max-page-size' in line:
+                          print(f"  {f}:{i}: {line.strip()}")
           else:
-              print("\nWARNING: --hash-style=both not found in any script. Trying fallback.")
+              print("\nWARNING: --hash-style=both not found. Dumping LDFLAGS lines for debug:")
               for f in targets:
                   try:
                       content = open(f).read()
                   except Exception:
                       continue
-                  if 'LDFLAGS' in content and 'android.sh' in f:
-                      print(f"  android.sh LDFLAGS lines:")
-                      for i, line in enumerate(content.splitlines()):
-                          if 'LDFLAGS' in line:
-                              print(f"    {i+1}: {line}")
-
+                  for i, line in enumerate(content.splitlines(), 1):
+                      if 'LDFLAGS' in line:
+                          print(f"  {f}:{i}: {line.strip()}")
           PYEOF
 
       - name: Patch all clang 18 and NDK r27c compatibility issues
@@ -151,13 +164,10 @@ jobs:
 
           for f in glob.glob('**/Application.mk', recursive=True):
               patch_application_mk(f)
-
           for f in glob.glob('**/Android.mk', recursive=True):
               patch_android_mk(f)
-
           for f in glob.glob('**/ffmpegkit.c', recursive=True):
               prepend_pragma(f, '-Wpointer-sign')
-
           for f in glob.glob('**/fftools_ffmpeg_mux_init.c', recursive=True):
               prepend_pragma(f, '-Wsingle-bit-bitfield-constant-conversion')
 
@@ -175,52 +185,97 @@ jobs:
             --disable-x86-64
           cp prebuilt/bundle-android-aar/ffmpeg-kit/ffmpeg-kit.aar ffmpeg-kit-universal.aar
 
-      - name: Verify RELRO alignment
+      - name: Verify universal compatibility
         run: |
           python3 << 'PYEOF'
           import struct, zipfile
 
+          # THE CORRECT VERIFICATION LOGIC:
+          #
+          # The Poco F1 crash happens because bionic's mprotect() for GNU RELRO
+          # rounds RELRO's start address DOWN to the nearest page boundary (4KB on
+          # a 4KB kernel, 16KB on a 16KB kernel), then calls mprotect on that range.
+          # If that rounded address falls in an unmapped gap between PT_LOAD segments,
+          # mprotect returns ENOMEM and dlopen fails.
+          #
+          # With 16KB-aligned PT_LOAD segments:
+          #   - All PT_GNU_RELRO segments are contained within a PT_LOAD segment
+          #   - There are no sub-16KB gaps between PT_LOAD segments
+          #   - Therefore PAGE_START(RELRO_vaddr, 4096) always falls within a
+          #     mapped PT_LOAD region → mprotect succeeds on 4KB kernels (Poco F1)
+          #   - PAGE_START(RELRO_vaddr, 16384) also falls within a mapped PT_LOAD
+          #     region → mprotect succeeds on 16KB kernels (Android 15+)
+          #
+          # The correct check is therefore: PT_LOAD align == 16384.
+          # Checking RELRO vaddr % 16384 == 0 is WRONG and too strict.
+
           def inspect(data):
               if data[:4] != b'\x7fELF' or data[4] != 2:
-                  return 0, None, True
+                  return None
               e_phoff     = struct.unpack_from('<Q', data, 32)[0]
               e_phentsize = struct.unpack_from('<H', data, 54)[0]
               e_phnum     = struct.unpack_from('<H', data, 56)[0]
-              max_load_align = 0
+              loads = []
               relro_vaddr = None
               for i in range(e_phnum):
-                  off    = e_phoff + i * e_phentsize
-                  p_type = struct.unpack_from('<I', data, off)[0]
-                  p_vaddr= struct.unpack_from('<Q', data, off + 16)[0]
-                  p_align= struct.unpack_from('<Q', data, off + 48)[0]
+                  off     = e_phoff + i * e_phentsize
+                  p_type  = struct.unpack_from('<I', data, off)[0]
+                  p_vaddr = struct.unpack_from('<Q', data, off + 16)[0]
+                  p_memsz = struct.unpack_from('<Q', data, off + 40)[0]
+                  p_align = struct.unpack_from('<Q', data, off + 48)[0]
                   if p_type == 1:
-                      max_load_align = max(max_load_align, p_align)
+                      loads.append((p_vaddr, p_memsz, p_align))
                   if p_type == 0x6474e552:
                       relro_vaddr = p_vaddr
-              relro_ok = (relro_vaddr is None) or (relro_vaddr % 16384 == 0)
-              return max_load_align, relro_vaddr, relro_ok
+              return loads, relro_vaddr
 
-          print("=== .so segment verification (must be 16KB-aligned for universal compat) ===")
-          print(f"{'Library':<35} {'LOAD align':>11} {'RELRO vaddr':>13} {'Status':>12}")
+          print("=== Universal compatibility verification ===")
+          print(f"  {'Library':<35} {'PT_LOAD':>8} {'RELRO@4KB':>11} {'RELRO@16KB':>11}  Result")
           all_ok = True
+
           with zipfile.ZipFile('ffmpeg-kit-universal.aar') as z:
               for name in sorted(z.namelist()):
                   if not name.endswith('.so'):
                       continue
-                  data = z.read(name)
-                  load_align, relro_vaddr, relro_ok = inspect(data)
+                  result = inspect(z.read(name))
+                  if result is None:
+                      continue
+                  loads, relro_vaddr = result
                   lib = name.split('/')[-1]
-                  align_str = f"{load_align//1024}KB" if load_align >= 1024 else f"{load_align}B"
-                  relro_str = f"0x{relro_vaddr:x}" if relro_vaddr else "none"
-                  status = "OK" if relro_ok else "MISALIGNED"
-                  if not relro_ok:
+
+                  if not loads:
+                      print(f"  {lib:<35}  (no PT_LOAD segments)")
+                      continue
+
+                  max_align = max(a for _, _, a in loads)
+
+                  # Core check: PT_LOAD must be 16KB aligned
+                  align_ok = (max_align == 16384)
+
+                  # Bonus check: simulate mprotect for both kernel types
+                  relro_4kb_ok  = True
+                  relro_16kb_ok = True
+                  if relro_vaddr is not None:
+                      pg4  = relro_vaddr & ~0xFFF
+                      pg16 = relro_vaddr & ~0x3FFF
+                      relro_4kb_ok  = any(b <= pg4  < b + s for b, s, _ in loads)
+                      relro_16kb_ok = any(b <= pg16 < b + s for b, s, _ in loads)
+
+                  ok = align_ok and relro_4kb_ok and relro_16kb_ok
+                  if not ok:
                       all_ok = False
-                  print(f"  {lib:<33} {align_str:>11} {relro_str:>13} {status:>12}")
+
+                  align_str   = f"{max_align//1024}KB"
+                  r4_str  = "ok" if relro_4kb_ok  else "FAIL"
+                  r16_str = "ok" if relro_16kb_ok else "FAIL"
+                  flag = "✅" if ok else "❌"
+                  print(f"  {lib:<35} {align_str:>8} {r4_str:>11} {r16_str:>11}  {flag}")
+
           print()
           if all_ok:
-              print("All RELRO segments are 16KB-aligned. Safe for both 4KB and 16KB kernels.")
+              print("✅  All .so files are universal. Safe on Poco F1 (4KB) and Android 15+ (16KB).")
           else:
-              print("RELRO misalignment detected - page-size flags did not reach the linker.")
+              print("❌  Compatibility issues detected. PT_LOAD must be 16KB aligned.")
               raise SystemExit(1)
           PYEOF
 
